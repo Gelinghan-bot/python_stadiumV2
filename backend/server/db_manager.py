@@ -70,6 +70,70 @@ class DBManager:
         finally:
             conn.close()
 
+    def delete_user_account(self, account, password):
+        """
+        用户自行注销账号
+        1. 验证密码
+        2. 取消所有未完成的预约（释放名额）
+        3. 删除用户
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # 1. 验证密码
+            cursor.execute("SELECT user_account FROM users WHERE user_account=? AND password=?", (account, password))
+            if not cursor.fetchone():
+                return False, "密码错误"
+
+            # 2. 处理未完成的预约 (confirmed/queued)
+            # 查找所有需要取消的预约
+            cursor.execute("SELECT reservation_id, slot_id, status FROM reservations WHERE user_account=? AND status IN ('confirmed', 'queued')", (account,))
+            active_reservations = cursor.fetchall()
+
+            import datetime
+            cancel_time = datetime.datetime.now()
+
+            for res_id, slot_id, status in active_reservations:
+                # 更新预约状态为 cancelled
+                cursor.execute("UPDATE reservations SET status='cancelled', cancel_time=? WHERE reservation_id=?", (cancel_time, res_id))
+                
+                # 如果是 confirmed，需要释放名额并检查候补
+                if status == 'confirmed':
+                    # 释放名额
+                    cursor.execute("UPDATE time_slots SET current_reservations = current_reservations - 1 WHERE slot_id=?", (slot_id,))
+                    
+                    # 检查候补 (复用之前的逻辑)
+                    cursor.execute("""
+                        SELECT r.reservation_id, r.user_account 
+                        FROM reservations r
+                        JOIN users u ON r.user_account = u.user_account
+                        WHERE r.slot_id = ? AND r.status = 'queued'
+                        ORDER BY u.credit_score DESC, r.create_time ASC
+                        LIMIT 1
+                    """, (slot_id,))
+                    queued_user = cursor.fetchone()
+                    if queued_user:
+                        q_res_id, q_user_acc = queued_user
+                        # 候补转正
+                        cursor.execute("UPDATE reservations SET status = 'confirmed' WHERE reservation_id = ?", (q_res_id,))
+                        # 占用名额
+                        cursor.execute("UPDATE time_slots SET current_reservations = current_reservations + 1 WHERE slot_id = ?", (slot_id,))
+
+            # 3. 清理其他关联数据
+            cursor.execute("DELETE FROM credit_logs WHERE user_account=?", (account,))
+            cursor.execute("DELETE FROM class_schedules WHERE teacher_account=?", (account,))
+
+            # 4. 删除用户
+            cursor.execute("DELETE FROM users WHERE user_account=?", (account,))
+            
+            conn.commit()
+            return True, "账号已注销"
+        except Exception as e:
+            conn.rollback()
+            return False, f"注销失败: {str(e)}"
+        finally:
+            conn.close()
+
     def get_available_slots(self, venue_id, date_str):
         """
         查询某场馆某天的可用时间段

@@ -87,6 +87,8 @@ class SportsVenueServer:
             return self.handle_get_schedules(data)
         elif action == 'check_in':    # 签到(完成预约，否则扣信用分)
             return self.handle_check_in(data)
+        elif action == 'delete_my_account': # 用户自行注销
+            return self.handle_delete_my_account(data)
         # --- Admin Actions ---
         elif action == 'admin_get_venues':
             return self.handle_admin_get_venues(data)
@@ -265,6 +267,18 @@ class SportsVenueServer:
             return {"status": "error", "message": "缺少必要参数"}
             
         success, message = self.db_manager.check_in_reservation(user_account, reservation_id)
+        if success:
+            return {"status": "success", "message": message}
+        else:
+            return {"status": "fail", "message": message}
+
+    def handle_delete_my_account(self, data):
+        account = data.get('account')
+        password = data.get('password')
+        if not account or not password:
+            return {"status": "error", "message": "缺少账号或密码"}
+            
+        success, message = self.db_manager.delete_user_account(account, password)
         if success:
             return {"status": "success", "message": message}
         else:
