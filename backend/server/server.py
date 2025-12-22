@@ -12,10 +12,12 @@ if project_root not in sys.path:
 
 try:
     from server.db_manager import DBManager
+    from server.statistics_manager import StatisticsManager
 except ImportError:
     # Fallback for direct execution
     sys.path.append(current_dir)
     from db_manager import DBManager
+    from statistics_manager import StatisticsManager
 
 class SportsVenueServer:
     def __init__(self, host='127.0.0.1', port=8888):
@@ -23,6 +25,7 @@ class SportsVenueServer:
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.db_manager = DBManager()
+        self.stats_manager = StatisticsManager()
         self.running = True
 
     def handle_client(self, client_socket):
@@ -117,6 +120,13 @@ class SportsVenueServer:
             return self.handle_admin_delete_announcement(data)
         elif action == 'add_post': # 用户发帖
             return self.handle_add_post(data)
+        # --- Statistics Actions ---
+        elif action == 'get_venue_stats':
+            return self.handle_get_venue_stats(data)
+        elif action == 'get_heatmap_data':
+            return self.handle_get_heatmap_data(data)
+        elif action == 'get_user_stats':
+            return self.handle_get_user_stats(data)
         else:
             return {"status": "error", "message": f"未知的请求类型: {action}"}
 
@@ -413,6 +423,35 @@ class SportsVenueServer:
             return {"status": "success", "message": message}
         else:
             return {"status": "fail", "message": message}
+
+    # --- Statistics Handlers ---
+    def handle_get_venue_stats(self, data):
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        success, result = self.stats_manager.get_venue_stats(start_date, end_date)
+        if success:
+            return {"status": "success", "data": result}
+        else:
+            return {"status": "fail", "message": result}
+
+    def handle_get_heatmap_data(self, data):
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        success, result = self.stats_manager.get_heatmap_data(start_date, end_date)
+        if success:
+            return {"status": "success", "data": result}
+        else:
+            return {"status": "fail", "message": result}
+
+    def handle_get_user_stats(self, data):
+        user_account = data.get('user_account')
+        if not user_account:
+            return {"status": "error", "message": "缺少用户账号"}
+        success, result = self.stats_manager.get_user_stats(user_account)
+        if success:
+            return {"status": "success", "data": result}
+        else:
+            return {"status": "fail", "message": result}
 
     def start_scheduler(self):
         """
