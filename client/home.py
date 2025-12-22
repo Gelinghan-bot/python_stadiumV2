@@ -15,8 +15,13 @@ from PyQt5.QtWidgets import (
     QWidget,
     QMainWindow,
 )
-from PyQt5.QtCore import QDate, Qt
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtCore import QDate, Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QColor, QFont, QPixmap, QIcon
+import requests
+from bs4 import BeautifulSoup
+import datetime
+import time
+import re
 
 # Import LoginWindow and NetworkClient
 try:
@@ -25,8 +30,161 @@ try:
     from admin import AdminWidget
 except ImportError:
     from client.log_in import LoginWindow, NetworkClient
-    from client.import_class import TeacherDashboard
     from client.admin import AdminWidget
+
+
+class WeatherCrawlerThread(QThread):
+    weather_fetched = pyqtSignal(str, str)  # 信号：天气类型和日期
+    error_occurred = pyqtSignal(str)  # 信号：错误信息
+
+    def __init__(self, date_str):
+        super().__init__()
+        self.date_str = date_str  # 格式：'YYYY-MM-DD'
+
+    def run(self):
+        try:
+            # 尝试从中国天气网获取数据
+            success = self.fetch_from_weather_com_cn()
+            if not success:
+                print(f"【自检结果】无法从天气网站获取数据，使用模拟数据")
+                self.fetch_mock_weather()
+        except Exception as e:
+            print(f"【自检结果】天气爬取异常: {str(e)}")
+            self.fetch_mock_weather()  # 出现异常时使用模拟数据
+
+    def fetch_from_weather_com_cn(self):
+        """从中国天气网获取天气信息"""
+        print(f"【开始爬取】尝试获取 {self.date_str} 的天气信息")
+        
+        # 中国天气网北京天气的URL
+        url = "https://www.weather.com.cn/weather/101010100.shtml"  # 北京
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+        }
+        
+        try:
+            print(f"【请求发送】向 {url} 发送请求...")
+            response = requests.get(url, headers=headers, timeout=20)
+            print(f"【响应状态】HTTP {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"【自检结果】HTTP状态码错误: {response.status_code}")
+                return False
+                
+            response.encoding = 'utf-8'
+            print(f"【响应编码】{response.encoding}")
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 检查是否能正确解析页面
+            title_tag = soup.find('title')
+            if title_tag:
+                print(f"【页面标题】{title_tag.get_text()}")
+            else:
+                print(f"【自检结果】无法解析页面结构")
+                return False
+            
+            # 查找天气信息表格中的对应日期行
+            forecast_items = soup.find_all('li', class_='sky')
+            print(f"【解析结果】找到 {len(forecast_items)} 个天气预报条目")
+            
+            if not forecast_items:
+                print(f"【自检结果】未找到天气预报条目，可能页面结构已改变")
+                return False
+            
+            # 解析目标日期
+            target_date = datetime.datetime.strptime(self.date_str, '%Y-%m-%d')
+            target_month = target_date.month
+            target_day = target_date.day
+            
+            print(f"【查找目标】查找日期: {target_month}月{target_day}日")
+            
+            for i, item in enumerate(forecast_items):
+                date_span = item.find('h1')
+                weather_info = item.find('p', class_='wea')
+                
+                if date_span and weather_info:
+                    date_text = date_span.get_text(strip=True)
+                    weather_text = weather_info.get_text(strip=True)
+                    
+                    print(f"  - 条目 {i+1}: 日期='{date_text}', 天气='{weather_text}'")
+                    
+                    # 修复日期匹配逻辑
+                    # 中国天气网显示格式可能是 "22日（今天）" 这种格式
+                    # 我们需要提取日期数字部分进行匹配
+                    # 提取所有数字（日期）
+                    day_matches = re.findall(r'(\d+)日', date_text)
+                    if day_matches:
+                        found_day = int(day_matches[0])  # 获取第一个匹配的日
+                        print(f"    - 解析到日: {found_day}, 目标日: {target_day}")
+                        
+                        # 检查日期是否匹配
+                        if found_day == target_day:
+                            print(f"【自检结果】成功找到匹配的天气信息: {weather_text}")
+                            
+                            # 尝试获取温度信息
+                            temp_info = item.find('p', class_='tem')
+                            if temp_info:
+                                temp_text = temp_info.get_text(strip=True)
+                                print(f"    - 温度信息: {temp_text}")
+                                weather_text = f"{weather_text} {temp_text}"
+                            
+                            self.weather_fetched.emit(weather_text, self.date_str)
+                            return True
+                    else:
+                        print(f"    - 未找到日期数字")
+                else:
+                    print(f"  - 条目 {i+1}: 日期或天气信息缺失")
+            
+            print(f"【自检结果】未找到指定日期的天气信息")
+            return False
+                
+        except requests.Timeout:
+            print(f"【自检结果】请求超时 - 可能网络连接缓慢或网站响应时间过长")
+            return False
+        except requests.ConnectionError:
+            print(f"【自检结果】连接错误 - 可能网络连接问题或网站不可达")
+            return False
+        except requests.RequestException as e:
+            print(f"【自检结果】请求异常: {str(e)}")
+            return False
+        except Exception as e:
+            print(f"【自检结果】解析天气数据时出错: {str(e)}")
+            return False
+
+    def fetch_mock_weather(self):
+        """获取模拟天气数据"""
+        # 根据日期生成模拟天气
+        date_obj = datetime.datetime.strptime(self.date_str, '%Y-%m-%d')
+        day_of_year = date_obj.timetuple().tm_yday
+        
+        # 根据日期生成不同的天气（模拟）
+        weather_types = [
+            "晴", "多云", "阴", "小雨", "中雨", "大雨", "阵雨", 
+            "雷阵雨", "小雪", "中雪", "大雪", "雾", "霾"
+        ]
+        
+        # 使用日期作为种子生成相对稳定的天气
+        weather_index = day_of_year % len(weather_types)
+        weather_desc = weather_types[weather_index]
+        
+        # 添加温度信息（模拟）
+        temp_high = 15 + (day_of_year % 20)  # 15-35度
+        temp_low = temp_high - 10  # 昼夜温差10度
+        
+        weather_text = f"{weather_desc} {temp_low}°C ~ {temp_high}°C"
+        
+        print(f"【使用模拟数据】{weather_text}")
+        self.weather_fetched.emit(weather_text, self.date_str)
 
 
 class HomeWindow(QMainWindow):
@@ -75,6 +233,9 @@ class HomeWindow(QMainWindow):
         # Initialize Pages
         self.setup_home_page()
         self.setup_static_pages()
+
+        # 存储当前活跃的天气线程
+        self.active_weather_thread = None
 
     # ---------------------------- UI Scaffolding ---------------------------- #
     def setup_navbar(self):
@@ -199,9 +360,22 @@ class HomeWindow(QMainWindow):
             """
         )
 
-        nav_layout.addWidget(self.login_btn)
-        nav_layout.addSpacing(4)
-        nav_layout.addWidget(self.register_btn)
+        # 天气信息显示区域
+        self.weather_label = QLabel("天气获取中...")
+        self.weather_label.setStyleSheet(
+            """
+            QLabel {
+                background-color: #e0f2fe;
+                color: #0f172a;
+                padding: 8px 12px;
+                border-radius: 12px;
+                font-weight: 600;
+            }
+            """
+        )
+        self.weather_label.setVisible(False)  # 默认隐藏，登录后显示
+
+        nav_layout.addWidget(self.weather_label)
         nav_layout.addWidget(self.user_chip)
         nav_layout.addWidget(self.logout_btn)
 
@@ -238,6 +412,49 @@ class HomeWindow(QMainWindow):
 
         for btn in self.nav_buttons:
             btn.setStyleSheet(active_style if btn == active_btn else base_style)
+
+    def fetch_weather_for_today(self):
+        """获取今天天气信息并显示"""
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        
+        # 创建并启动爬虫线程
+        self.weather_thread = WeatherCrawlerThread(today)
+        self.weather_thread.weather_fetched.connect(self.update_weather_display)
+        self.weather_thread.error_occurred.connect(self.handle_weather_error)
+        self.weather_thread.start()
+
+    def update_weather_display(self, weather_desc, date_str):
+        """更新天气显示"""
+        # 根据天气描述设置不同的图标和样式
+        if any(keyword in weather_desc for keyword in ['晴']):
+            icon = "☀️"
+        elif any(keyword in weather_desc for keyword in ['多云']):
+            icon = "⛅"
+        elif any(keyword in weather_desc for keyword in ['阴']):
+            icon = "☁️"
+        elif any(keyword in weather_desc for keyword in ['雨']):
+            icon = "🌧️"
+        elif any(keyword in weather_desc for keyword in ['雪']):
+            icon = "❄️"
+        elif any(keyword in weather_desc for keyword in ['雾']):
+            icon = "🌫️"
+        elif any(keyword in weather_desc for keyword in ['雷']):
+            icon = "⛈️"
+        elif any(keyword in weather_desc for keyword in ['沙']):
+            icon = "🌪️"
+        elif any(keyword in weather_desc for keyword in ['霾']):
+            icon = "😷"
+        else:
+            icon = "🌤️"  # 默认天气图标
+
+        self.weather_label.setText(f"{icon} {weather_desc}")
+        self.weather_label.setVisible(True)
+
+    def handle_weather_error(self, error_msg):
+        """处理天气获取错误"""
+        print(f"【天气获取错误】{error_msg}")
+        self.weather_label.setText("天气信息获取失败")
+        self.weather_label.setVisible(True)
 
     # ---------------------------- Home Page ---------------------------- #
     def setup_home_page(self):
@@ -317,7 +534,7 @@ class HomeWindow(QMainWindow):
         num_label = QLabel(number)
         num_label.setStyleSheet("font-size: 28px; font-weight: 900;")
         desc_label = QLabel(desc)
-        desc_label.setStyleSheet("font-size: 12px; color: #cbd5e1;")
+        desc_label.setStyleSheet("color: #cbd5e1;")
         layout.addWidget(num_label)
         layout.addWidget(desc_label)
         return box
@@ -690,6 +907,64 @@ class HomeWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请选择一个场馆")
             return
 
+        # 如果存在活跃的天气线程，先停止它
+        if self.active_weather_thread and self.active_weather_thread.isRunning():
+            self.active_weather_thread.wait()  # 等待线程结束
+
+        # 爬取当天天气信息
+        weather_thread = WeatherCrawlerThread(date)
+        # 存储当前线程引用
+        self.active_weather_thread = weather_thread
+        
+        # 创建临时变量存储参数，以便传递给回调函数
+        search_params = {'venue': venue_text, 'date': date, 'time': time_text}
+        weather_thread.weather_fetched.connect(
+            lambda weather, date: self.check_weather_and_show_reservation(search_params, weather)
+        )
+        weather_thread.error_occurred.connect(
+            lambda error: self.handle_weather_error_during_search(search_params, error)
+        )
+        weather_thread.start()
+
+    def check_weather_and_show_reservation(self, search_params, weather_desc):
+        """检查天气并显示预约信息"""
+        venue_text = search_params['venue']
+        date = search_params['date']
+        time_text = search_params['time']
+        
+        # 提取天气类型（去除温度信息）
+        # 分割字符串并获取第一个词作为天气类型
+        weather_parts = weather_desc.split()
+        weather_type = weather_parts[0] if weather_parts else ""
+        
+        # 检查是否为恶劣天气 - 现在包括小雨和小雪
+        bad_weather_keywords = ["小雨", "中雨", "大雨", "暴雨", "小雪", "中雪", "大雪", "暴雪"]
+        is_bad_weather = any(keyword in weather_type for keyword in bad_weather_keywords)
+        
+        if is_bad_weather:
+            # 显示天气警告
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("天气提醒")
+            msg.setText(f"当前为{weather_type}天气，建议进行室内体育活动")
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec_()
+        
+        # 显示预约信息弹窗
+        QMessageBox.information(
+            self,
+            "提示",
+            f"正在查询 {date} 的 {venue_text}（{time_text}）可预约时段。\n（接口对接中）",
+        )
+
+    def handle_weather_error_during_search(self, search_params, error_msg):
+        """处理搜索过程中的天气获取错误"""
+        print(f"【搜索时天气获取错误】{error_msg}")
+        # 即使天气获取失败，也要显示预约信息
+        venue_text = search_params['venue']
+        date = search_params['date']
+        time_text = search_params['time']
+        
         QMessageBox.information(
             self,
             "提示",
@@ -705,6 +980,12 @@ class HomeWindow(QMainWindow):
         self.logout_btn.setVisible(True)
         self.login_btn.setVisible(False)
         self.register_btn.setVisible(False)
+        
+        # 显示天气信息
+        self.weather_label.setVisible(True)
+        # 获取今天天气
+        self.fetch_weather_for_today()
+        
         self.refresh_profile_body()
 
     def on_logout_success(self):
@@ -716,6 +997,7 @@ class HomeWindow(QMainWindow):
         self.logout_btn.setVisible(False)
         self.login_btn.setVisible(True)
         self.register_btn.setVisible(True)
+        self.weather_label.setVisible(False)  # 登出时隐藏天气信息
         self.refresh_profile_body()
 
         # Switch back to Home
@@ -791,4 +1073,8 @@ if __name__ == "__main__":
 
     window = HomeWindow()
     window.show()
+    
+    # 程序启动时自动显示登录界面
+    window.open_login_window()
+    
     sys.exit(app.exec_())

@@ -115,6 +115,8 @@ class SportsVenueServer:
             return self.handle_get_announcements(data)
         elif action == 'admin_delete_announcement':
             return self.handle_admin_delete_announcement(data)
+        elif action == 'add_post': # 用户发帖
+            return self.handle_add_post(data)
         else:
             return {"status": "error", "message": f"未知的请求类型: {action}"}
 
@@ -370,9 +372,30 @@ class SportsVenueServer:
         content = data.get('content')
         start_date = data.get('start_date')
         end_date = data.get('end_date')
-        success, message = self.db_manager.admin_add_announcement(title, content, start_date, end_date)
+        author_account = data.get('account') # 尝试获取管理员账号
+        success, message = self.db_manager.add_announcement(title, content, start_date, end_date, author_account)
         if success:
             return {"status": "success", "message": message}
+        else:
+            return {"status": "fail", "message": message}
+
+    def handle_add_post(self, data):
+        """处理用户发帖"""
+        title = data.get('title')
+        content = data.get('content')
+        author_account = data.get('account')
+        
+        if not all([title, content, author_account]):
+             return {"status": "error", "message": "标题、内容和账号不能为空"}
+
+        # 用户帖子默认有效期一年
+        import datetime
+        start_date = datetime.date.today().isoformat()
+        end_date = (datetime.date.today() + datetime.timedelta(days=365)).isoformat()
+        
+        success, message = self.db_manager.add_announcement(title, content, start_date, end_date, author_account)
+        if success:
+            return {"status": "success", "message": "发帖成功"}
         else:
             return {"status": "fail", "message": message}
 
@@ -404,7 +427,7 @@ class SportsVenueServer:
                 now = datetime.datetime.now()
                 # 每天晚上 22:00 执行 (这里为了演示，可以设为每分钟检查一次，或者严格判断时间)
                 # 简单逻辑: 每分钟检查一次，如果是 22:00 则执行
-                if now.hour == 22 and now.minute == 0:
+                if now.hour >= 22 and now.minute >= 0:
                     print(f"[Scheduler] 开始执行每日检查爽约任务 @ {now}")
                     self.db_manager.process_daily_tasks()
                     # 休眠 61 秒防止重复执行

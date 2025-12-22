@@ -76,6 +76,16 @@ class DBManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
+            import datetime
+            # 校验日期范围：只能查询未来3天 (Today ~ Today+2)
+            today = datetime.date.today()
+            query_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+            
+            max_date = today + datetime.timedelta(days=2)
+            
+            if query_date < today or query_date > max_date:
+                return False, "只能查询未来3天内的号源"
+            
             # 关联查询：时间段 -> 场地 -> 场馆
             # 查询所有时间段（包括已满），由前端判断是否可预约
             sql = """
@@ -446,6 +456,13 @@ class DBManager:
                         SET current_reservations = 0 
                         WHERE slot_id = ?
                     """, (s_id,))
+
+                    # 如果该时间段在未来3天之外，直接删除该 time_slot 记录,如果在3天内，则保留（因为普通用户可见可约）
+                    max_rolling_date = today + datetime.timedelta(days=2)
+                    s_date_obj = datetime.datetime.strptime(s_date_str, '%Y-%m-%d').date()
+                    
+                    if s_date_obj > max_rolling_date:
+                        cursor.execute("DELETE FROM time_slots WHERE slot_id = ?", (s_id,))
             
             conn.commit()
             return True, "课表移除成功，场地已释放"
@@ -604,6 +621,9 @@ class DBManager:
                         INSERT INTO credit_logs (user_account, change_amount, reason, time)
                         VALUES (?, ?, '封禁期满恢复', ?)
                     """, (u_acc, 100 - u_score, now))
+            
+             # --- 任务3: 自动维护号源 (滚动3天) ---
+            self._auto_manage_slots(cursor, today_date)
 
             conn.commit()
             return True, f"任务执行完毕. 处理爽约:{len(noshow_list)}人"
@@ -615,8 +635,63 @@ class DBManager:
         finally:
             conn.close()
 
-    # 管理员功能↓--- Admin Functions ---
+    def _auto_manage_slots(self, cursor, today_date):
+        """
+        内部方法：自动维护号源
+        1. 删除过期号源 (date <= today)
+        2. 确保未来3天 (today+1, today+2, today+3) 的号源存在
+        """
+        import datetime
+        print("[Task] 开始维护time_slots...")
+        
+        # 1. 清理过期号源
+        # 策略修改：仅删除“过去且未被预约”的号源，保留有预约记录的号源以供历史查询
+        # 这样既能清理垃圾数据，又能保证用户能查到历史订单
+        cursor.execute("""
+            DELETE FROM time_slots 
+            WHERE date <= ? 
+            AND slot_id NOT IN (SELECT DISTINCT slot_id FROM reservations)
+        """, (today_date,))
+        deleted_count = cursor.rowcount
+        print(f"[Task] 已清理未使用的过期号源: {deleted_count} 条 (保留了有历史订单的号源)")
+        
+        # 2. 生成未来3天号源
+        # 获取所有场地
+        cursor.execute("SELECT court_id FROM courts")
+        courts = cursor.fetchall()
+        court_ids = [c[0] for c in courts]
+        
+        if not court_ids:
+            print("[Task] 无场地，跳过生成")
+            return
 
+        # 遍历未来3天 (1, 2, 3)
+        for i in range(1, 4):
+            target_date = today_date + datetime.timedelta(days=i)
+            date_str = target_date.strftime("%Y-%m-%d")
+            
+            # 遍历时间 9:00 - 22:00
+            for h in range(9, 22):
+                start_time = f"{h:02d}:00:00"
+                end_time = f"{h+1:02d}:00:00"
+                
+                for cid in court_ids:
+                    # 检查是否存在
+                    cursor.execute("""
+                        SELECT slot_id FROM time_slots 
+                        WHERE court_id=? AND date=? AND start_time=?
+                    """, (cid, date_str, start_time))
+                    
+                    if not cursor.fetchone():
+                        # 插入新号源
+                        cursor.execute("""
+                            INSERT INTO time_slots (court_id, date, start_time, end_time, max_reservations, current_reservations, is_hot)
+                            VALUES (?, ?, ?, ?, 8, 0, 0)
+                        """, (cid, date_str, start_time, end_time))
+        
+        print("[Task] time_slots自动生成&删除维护已完成")
+
+    # 管理员功能↓--- Admin Functions ---
     def admin_get_venues(self):
         """获取所有场馆信息"""
         conn = self.get_connection()
@@ -836,15 +911,15 @@ class DBManager:
         finally:
             conn.close()
 
-    def admin_add_announcement(self, title, content, start_date, end_date):
-        """发布公告"""
+    def add_announcement(self, title, content, start_date, end_date, author_account=None):
+        """发布公告/帖子"""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
             import datetime
             create_time = datetime.datetime.now()
-            cursor.execute("INSERT INTO announcements (title, content, start_date, end_date, create_time) VALUES (?, ?, ?, ?, ?)",
-                           (title, content, start_date, end_date, create_time))
+            cursor.execute("INSERT INTO announcements (title, content, start_date, end_date, create_time, author_account) VALUES (?, ?, ?, ?, ?, ?)",
+                           (title, content, start_date, end_date, create_time, author_account))
             conn.commit()
             return True, "发布成功"
         except Exception as e:
@@ -853,13 +928,22 @@ class DBManager:
             conn.close()
 
     def get_announcements(self):
-        """获取有效公告"""
+        """获取有效公告/帖子"""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
             import datetime
             today = datetime.date.today()
-            cursor.execute("SELECT * FROM announcements WHERE end_date >= ? ORDER BY create_time DESC", (today,))
+            # Join with users table to get author name and role
+            sql = """
+                SELECT a.announcement_id, a.title, a.content, a.start_date, a.end_date, a.create_time, 
+                       u.name, u.role, a.author_account
+                FROM announcements a
+                LEFT JOIN users u ON a.author_account = u.user_account
+                WHERE a.end_date >= ?
+                ORDER BY a.create_time DESC
+            """
+            cursor.execute(sql, (today,))
             rows = cursor.fetchall()
             anns = []
             for row in rows:
@@ -867,8 +951,12 @@ class DBManager:
                     "id": row[0],
                     "title": row[1],
                     "content": row[2],
-                    "start_date": row[4],
-                    "end_date": row[5]
+                    "start_date": row[3],
+                    "end_date": row[4],
+                    "create_time": row[5],
+                    "author_name": row[6] if row[6] else "管理员", # Default if null (old data)
+                    "author_role": row[7] if row[7] else "admin", # Default if null
+                    "author_account": row[8]
                 })
             return True, anns
         except Exception as e:

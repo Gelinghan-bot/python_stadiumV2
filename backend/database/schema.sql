@@ -66,11 +66,13 @@ CREATE TABLE IF NOT EXISTS announcements (
     announcement_id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL, -- 公告标题
     content TEXT NOT NULL, -- 公告内容
+    author_account TEXT, -- 发布者账号 (新增)
     related_venue_id INTEGER, -- 关联场馆 ID (可空)
     start_date DATE NOT NULL, -- 生效日期
     end_date DATE NOT NULL, -- 失效日期
     create_time DATETIME NOT NULL, -- 创建时间
-    FOREIGN KEY (related_venue_id) REFERENCES venues(venue_id)
+    FOREIGN KEY (related_venue_id) REFERENCES venues(venue_id),
+    FOREIGN KEY (author_account) REFERENCES users(user_account)
 );
 
 -- 8. 天气表 (weather_info)
