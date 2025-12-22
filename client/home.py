@@ -290,7 +290,24 @@ class HomeWindow(QMainWindow):
         # Auth Buttons / User Chip
         nav_layout.addStretch(2)
 
-        self.login_btn = QPushButton("登录")
+        # 天气信息显示区域 (Always add to layout, visibility controlled by logic)
+        self.weather_label = QLabel("天气获取中...")
+        self.weather_label.setStyleSheet(
+            """
+            QLabel {
+                background-color: #e0f2fe;
+                color: #0f172a;
+                padding: 8px 12px;
+                border-radius: 12px;
+                font-weight: 600;
+            }
+            """
+        )
+        self.weather_label.setVisible(False)  # 默认隐藏，登录后显示
+        nav_layout.addWidget(self.weather_label)
+        nav_layout.addSpacing(10)
+
+        self.login_btn = QPushButton("Login")
         self.login_btn.setCursor(Qt.PointingHandCursor)
         self.login_btn.clicked.connect(self.open_login_window)
         self.login_btn.setStyleSheet(
@@ -298,34 +315,34 @@ class HomeWindow(QMainWindow):
             QPushButton {
                 border: none;
                 background: transparent;
-                color: #111827;
-                font-size: 16px;
-                font-weight: 600;
-                padding: 10px 16px;
+                color: #1f2937;
+                font-size: 24px;
+                font-weight: bold;
             }
-            QPushButton:hover { color: #4f46e5; }
+            QPushButton:hover {
+                color: #84cc16;
+            }
             """
         )
 
-        self.register_btn = QPushButton("注册")
+        self.register_btn = QPushButton("Sign up")
         self.register_btn.setCursor(Qt.PointingHandCursor)
         self.register_btn.clicked.connect(self.open_register_window)
-        self.register_btn.setFixedHeight(40)
+        self.register_btn.setFixedSize(100, 48)
         self.register_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                border: 2px solid {self.brand_color};
+            """
+            QPushButton {
+                border: 2px solid #84cc16;
                 background-color: white;
-                color: {self.brand_color};
-                font-size: 15px;
-                font-weight: 700;
-                border-radius: 6px;
-                padding: 0 16px;
-            }}
-            QPushButton:hover {{
-                background-color: {self.brand_color};
+                color: #84cc16;
+                font-size: 24px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #84cc16;
                 color: white;
-            }}
+            }
             """
         )
 
@@ -360,22 +377,8 @@ class HomeWindow(QMainWindow):
             """
         )
 
-        # 天气信息显示区域
-        self.weather_label = QLabel("天气获取中...")
-        self.weather_label.setStyleSheet(
-            """
-            QLabel {
-                background-color: #e0f2fe;
-                color: #0f172a;
-                padding: 8px 12px;
-                border-radius: 12px;
-                font-weight: 600;
-            }
-            """
-        )
-        self.weather_label.setVisible(False)  # 默认隐藏，登录后显示
-
-        nav_layout.addWidget(self.weather_label)
+        nav_layout.addWidget(self.login_btn)
+        nav_layout.addWidget(self.register_btn)
         nav_layout.addWidget(self.user_chip)
         nav_layout.addWidget(self.logout_btn)
 
@@ -1059,6 +1062,12 @@ class HomeWindow(QMainWindow):
         # Other static tabs
         page = self.pages.get(key)
         if page:
+            # Restricted pages
+            if key in ["profile", "settings"]:
+                if not self.current_user:
+                    self.open_login_window()
+                    return
+
             if key == "profile":
                 self.refresh_profile_body()
             self.content_stack.setCurrentWidget(page)
@@ -1073,8 +1082,5 @@ if __name__ == "__main__":
 
     window = HomeWindow()
     window.show()
-    
-    # 程序启动时自动显示登录界面
-    window.open_login_window()
     
     sys.exit(app.exec_())
