@@ -355,7 +355,7 @@ class HomeWindow(QMainWindow):
 
         # Venue Selection
         self.venue_combo_box, self.venue_combo = self.build_labeled_combo(
-            "场馆", ["请选择场馆", "篮球馆", "羽毛球馆", "网球馆", "游泳馆", "综合训练馆"]
+            "场馆", ["请选择场馆", "足球场", "篮球馆", "排球场", "网球场", "羽毛球馆","乒乓球馆","健身房","台球室","游泳馆"]
         )
 
         # Date Selection
