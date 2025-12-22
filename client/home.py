@@ -852,11 +852,38 @@ class HomeWindow(QMainWindow):
                     f"姓名：{user.get('name', '')}",
                     f"角色：{user.get('role', '')}",
                     f"账号：{user.get('account', '')}",
+                    f"信用分：{user.get('credit_score', 'N/A')}",
                 ],
             )
             self.profile_body.addWidget(info_card)
+            
+            # Fetch reservations
+            res_list = []
+            try:
+                resp = self.network.send_request("get_my_reservations", {"user_account": user['account']})
+                if resp and resp.get("status") == "success":
+                    data = resp.get("data", [])
+                    if data:
+                        for r in data:
+                            # r: {id, venue, court, date, time, status}
+                            status_map = {
+                                "confirmed": "已预约",
+                                "cancelled": "已取消",
+                                "queued": "排队中",
+                                "finished": "已完成"
+                            }
+                            status_text = status_map.get(r['status'], r['status'])
+                            res_list.append(f"{r['date']} {r['time']} | {r['venue']} {r['court']} | {status_text}")
+                    else:
+                        res_list.append("暂无预约记录")
+                else:
+                    res_list.append("获取预约失败")
+            except Exception as e:
+                print(f"Error fetching reservations: {e}")
+                res_list.append("获取预约出错")
+
             self.profile_body.addWidget(
-                self.list_card("最近预约", ["暂无数据，预约后将出现在这里。"])
+                self.list_card("最近预约", res_list)
             )
 
     def build_settings_page(self):

@@ -23,14 +23,15 @@ class DBManager:
         cursor = conn.cursor()
         try:
             # 查询用户
-            cursor.execute("SELECT user_account, name, role FROM users WHERE user_account=? AND password=?", (account, password))
+            cursor.execute("SELECT user_account, name, role, credit_score FROM users WHERE user_account=? AND password=?", (account, password))
             user = cursor.fetchone()
             
             if user:  # 登录成功，返回用户信息
                 user_info = {
                     "account": user[0],
                     "name": user[1],
-                    "role": user[2]
+                    "role": user[2],
+                    "credit_score": user[3]
                 }
                 return True, user_info
             else:  #找不到user，登陆失败
@@ -136,14 +137,45 @@ class DBManager:
                 return False, "您的信用分过低(≤60)，已被禁止预约。请等待一周后恢复。"
             
             # 2. 检查时间段状态 (容量、是否热门)
-            cursor.execute("SELECT current_reservations, max_reservations, is_hot, start_time FROM time_slots WHERE slot_id=?", (slot_id,))
+            cursor.execute("SELECT current_reservations, max_reservations, is_hot, start_time, date FROM time_slots WHERE slot_id=?", (slot_id,))
             slot_res = cursor.fetchone()
             if not slot_res:
                 return False, "时间段不存在"
-            current_res, max_res, is_hot, start_time = slot_res
-            # 逻辑：如果满了，无法预约
-            if current_res >= max_res:
-                return False, "该时段预约人数已满"
+            current_res, max_res, is_hot, start_time, date_str = slot_res
+            
+            # --- 热门时段信用分优先排队逻辑 ---
+            # 判断是否为指定热门时段: 周六/周日 19:00-21:00 且 max_reservations > 1
+            is_special_hot = False
+            try:
+                slot_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                weekday = slot_date.weekday() # 0=Mon, 5=Sat, 6=Sun
+                hour = int(start_time.split(':')[0])
+                
+                if (weekday == 5 or weekday == 6) and (19 <= hour < 21) and max_res > 1:
+                    is_special_hot = True
+            except:
+                pass
+
+            if is_special_hot:
+                # 逻辑: 如果已满，进入候补队列(queued)
+                if current_res >= max_res:
+                    # 检查是否已在队列中
+                    cursor.execute("SELECT reservation_id FROM reservations WHERE user_account=? AND slot_id=? AND status='queued'", (user_account, slot_id))
+                    if cursor.fetchone():
+                        return False, "您已在候补队列中"
+                    
+                    # 插入候补记录
+                    create_time = datetime.datetime.now()
+                    cursor.execute("""
+                        INSERT INTO reservations (user_account, slot_id, status, create_time)
+                        VALUES (?, ?, 'queued', ?)
+                    """, (user_account, slot_id, create_time))
+                    conn.commit()
+                    return True, "预约已满，已加入候补队列（信用分优先）"
+            else:
+                # 普通逻辑: 如果满了，无法预约
+                if current_res >= max_res:
+                    return False, "该时段预约人数已满"
             
             # 逻辑：信用分限制 (示例：低于80分不能预约热门时段 - 可选)
             if is_hot and credit_score <= 80:
@@ -154,7 +186,7 @@ class DBManager:
             # 如果是不同场地同一时间，可能需要更复杂的 SQL 判断 start_time
             cursor.execute("""
                 SELECT r.reservation_id FROM reservations r
-                WHERE r.user_account = ? AND r.slot_id = ? AND r.status = 'confirmed'
+                WHERE r.user_account = ? AND r.slot_id = ? AND r.status IN ('confirmed', 'queued')
             """, (user_account, slot_id))
             if cursor.fetchone():
                 return False, "您已预约过该时段，请勿重复预约"
@@ -239,8 +271,8 @@ class DBManager:
             
             slot_id, status = res
             
-            if status != 'confirmed':
-                return False, f"当前状态({status})无法取消"
+            if status == 'cancelled':
+                return False, "预约已取消"
             
             # 2. 执行取消 (事务)
             cancel_time = datetime.datetime.now()
@@ -252,15 +284,49 @@ class DBManager:
                 WHERE reservation_id = ?
             """, (cancel_time, reservation_id))
             
-            # 释放名额 (人数 -1)
-            cursor.execute("""
-                UPDATE time_slots 
-                SET current_reservations = current_reservations - 1 
-                WHERE slot_id = ?
-            """, (slot_id,))
-            
-            conn.commit()
-            return True, "取消成功"
+            # 如果是排队状态，直接取消，不影响名额
+            if status == 'queued':
+                conn.commit()
+                return True, "排队已取消"
+
+            # 如果是已确认状态，释放名额并检查候补
+            if status == 'confirmed':
+                # 先减少人数
+                cursor.execute("""
+                    UPDATE time_slots 
+                    SET current_reservations = current_reservations - 1 
+                    WHERE slot_id = ?
+                """, (slot_id,))
+                
+                # 检查候补队列 (信用分优先: 分数高优先，同分先到先得)
+                cursor.execute("""
+                    SELECT r.reservation_id, r.user_account 
+                    FROM reservations r
+                    JOIN users u ON r.user_account = u.user_account
+                    WHERE r.slot_id = ? AND r.status = 'queued'
+                    ORDER BY u.credit_score DESC, r.create_time ASC
+                    LIMIT 1
+                """, (slot_id,))
+                
+                queued_user = cursor.fetchone()
+                if queued_user:
+                    q_res_id, q_user_acc = queued_user
+                    # 候补转正
+                    cursor.execute("""
+                        UPDATE reservations 
+                        SET status = 'confirmed' 
+                        WHERE reservation_id = ?
+                    """, (q_res_id,))
+                    
+                    # 占用名额
+                    cursor.execute("""
+                        UPDATE time_slots 
+                        SET current_reservations = current_reservations + 1 
+                        WHERE slot_id = ?
+                    """, (slot_id,))
+                    
+                conn.commit()
+                return True, "取消成功"
             
         except Exception as e:
             conn.rollback()
