@@ -905,7 +905,7 @@ class DBManager:
             return
 
         # 遍历未来3天 (1, 2, 3)
-        for i in range(3):
+        for i in range(1,4):
             target_date = today_date + datetime.timedelta(days=i)
             date_str = target_date.strftime("%Y-%m-%d")
             
