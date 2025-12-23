@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QInputDialog,
     QPushButton,
     QStackedWidget,
     QSizePolicy,
@@ -194,6 +195,18 @@ class HomeWindow(QMainWindow):
         self.current_user = None  # Track login state
         self.brand_color = "#84cc16"
         self.dark_text = "#111827"
+        self.venue_name_to_id = {
+            "足球场": 1,
+            "篮球场": 2,
+            "篮球馆": 2,
+            "排球场": 3,
+            "网球场": 4,
+            "羽毛球馆": 5,
+            "乒乓球馆": 6,
+            "健身房": 7,
+            "台球室": 8,
+            "游泳馆": 9,
+        }
 
         # Initialize Network Client and connect immediately
         self.network = NetworkClient()
@@ -924,6 +937,105 @@ class HomeWindow(QMainWindow):
         self.login_window.show_register()
         self.login_window.show()
 
+    def show_available_slots(self, search_params):
+        venue_text = search_params["venue"]
+        date = search_params["date"]
+        time_text = search_params["time"]
+        venue_id = search_params["venue_id"]
+
+        resp = self.network.send_request(
+            "get_available_slots", {"venue_id": venue_id, "date": date}
+        )
+        if not resp or resp.get("status") != "success":
+            QMessageBox.warning(
+                self, "提示", resp.get("message", "可预约时段查询失败")
+            )
+            return
+
+        slots = resp.get("data", [])
+        time_ranges = {
+            "06:00 - 10:00 早间": ("06:00:00", "10:00:00"),
+            "10:00 - 14:00 午间": ("10:00:00", "14:00:00"),
+            "14:00 - 18:00 下午": ("14:00:00", "18:00:00"),
+            "18:00 - 22:00 夜间": ("18:00:00", "22:00:00"),
+        }
+        if time_text in time_ranges:
+            start_time, end_time = time_ranges[time_text]
+            slots = [
+                slot
+                for slot in slots
+                if start_time <= slot.get("start_time", "") < end_time
+            ]
+
+        available_slots = [
+            slot for slot in slots if slot.get("current", 0) < slot.get("max", 0)
+        ]
+        if not available_slots:
+            QMessageBox.information(
+                self, "提示", f"{date} 的 {venue_text} 暂无可预约时段。"
+            )
+            return
+
+        grouped = {}
+        for slot in available_slots:
+            time_key = f"{slot.get('start_time', '')[:5]}-{slot.get('end_time', '')[:5]}"
+            info = grouped.setdefault(
+                time_key, {"courts": 0, "remaining": 0, "slots": []}
+            )
+            info["courts"] += 1
+            remaining = max(0, slot.get("max", 0) - slot.get("current", 0))
+            info["remaining"] += remaining
+            info["slots"].append(slot)
+
+        display_items = []
+        time_keys = []
+        for time_key in sorted(grouped.keys()):
+            info = grouped[time_key]
+            display_items.append(
+                f"{time_key}（可约场地：{info['courts']}，剩余名额：{info['remaining']}）"
+            )
+            time_keys.append(time_key)
+
+        prompt = f"{date} 的 {venue_text} 可预约时间段："
+        if time_text != "任何时间":
+            prompt = f"{prompt}\n筛选：{time_text}"
+
+        selection, ok = QInputDialog.getItem(
+            self, "选择预约时间段", prompt, display_items, 0, False
+        )
+        if not ok:
+            return
+
+        selected_index = display_items.index(selection)
+        selected_time_key = time_keys[selected_index]
+        slots_for_time = grouped[selected_time_key]["slots"]
+
+        def slot_sort_key(slot):
+            remaining = max(0, slot.get("max", 0) - slot.get("current", 0))
+            return (-remaining, slot.get("court_name", ""), slot.get("slot_id", 0))
+
+        chosen_slot = sorted(slots_for_time, key=slot_sort_key)[0]
+        slot_id = chosen_slot.get("slot_id")
+        if not slot_id:
+            QMessageBox.warning(self, "提示", "预约失败：时间段信息异常")
+            return
+
+        resp = self.network.send_request(
+            "book_venue",
+            {"user_account": self.current_user["account"], "slot_id": slot_id},
+        )
+        if resp and resp.get("status") == "success":
+            court_name = chosen_slot.get("court_name", "")
+            QMessageBox.information(
+                self,
+                "预约成功",
+                f"{date} {selected_time_key} | {venue_text} {court_name}\n{resp.get('message', '预约成功')}",
+            )
+        else:
+            QMessageBox.warning(
+                self, "预约失败", resp.get("message", "预约失败，请稍后重试")
+            )
+
     def handle_search(self):
         """Handle search button click"""
         if not self.current_user:
@@ -936,6 +1048,19 @@ class HomeWindow(QMainWindow):
         if venue_text.startswith("请选择"):
             QMessageBox.warning(self, "提示", "请选择一个场馆")
             return
+        venue_id = self.venue_name_to_id.get(venue_text)
+        if not venue_id:
+            QMessageBox.warning(self, "提示", "场馆信息异常，请重新选择")
+            return
+        try:
+            query_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            QMessageBox.warning(self, "提示", "日期格式错误，请重新选择")
+            return
+        today = datetime.date.today()
+        if query_date < today or query_date > today + datetime.timedelta(days=2):
+            QMessageBox.warning(self, "提示", "仅支持查询今天、明天、后天的可预约时段")
+            return
 
         # 如果存在活跃的天气线程，先停止它
         if self.active_weather_thread and self.active_weather_thread.isRunning():
@@ -947,7 +1072,12 @@ class HomeWindow(QMainWindow):
         self.active_weather_thread = weather_thread
         
         # 创建临时变量存储参数，以便传递给回调函数
-        search_params = {'venue': venue_text, 'date': date, 'time': time_text}
+        search_params = {
+            "venue": venue_text,
+            "date": date,
+            "time": time_text,
+            "venue_id": venue_id,
+        }
         weather_thread.weather_fetched.connect(
             lambda weather, date: self.check_weather_and_show_reservation(search_params, weather)
         )
@@ -979,27 +1109,12 @@ class HomeWindow(QMainWindow):
             msg.setText(f"当前为{weather_type}天气，建议进行室内体育活动")
             msg.setStandardButtons(QMessageBox.Ok)
             msg.exec_()
-        
-        # 显示预约信息弹窗
-        QMessageBox.information(
-            self,
-            "提示",
-            f"正在查询 {date} 的 {venue_text}（{time_text}）可预约时段。\n（接口对接中）",
-        )
+        self.show_available_slots(search_params)
 
     def handle_weather_error_during_search(self, search_params, error_msg):
         """处理搜索过程中的天气获取错误"""
         print(f"【搜索时天气获取错误】{error_msg}")
-        # 即使天气获取失败，也要显示预约信息
-        venue_text = search_params['venue']
-        date = search_params['date']
-        time_text = search_params['time']
-        
-        QMessageBox.information(
-            self,
-            "提示",
-            f"正在查询 {date} 的 {venue_text}（{time_text}）可预约时段。\n（接口对接中）",
-        )
+        self.show_available_slots(search_params)
 
     def on_login_success(self, user):
         """Callback when login is successful"""
@@ -1111,3 +1226,4 @@ if __name__ == "__main__":
     window.show()
     
     sys.exit(app.exec_())
+ 

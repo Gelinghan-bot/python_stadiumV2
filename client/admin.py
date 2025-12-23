@@ -1,3 +1,4 @@
+import os
 from PyQt5.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -9,6 +10,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -17,6 +19,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from PyQt5.QtCore import Qt, QDate
+from PyQt5.QtGui import QPixmap
 
 
 class AdminWidget(QWidget):
@@ -47,6 +50,45 @@ class AdminWidget(QWidget):
         self.setup_user_tab()
         self.setup_reservation_tab()
         self.setup_announcement_tab()
+        self.setup_analytics_tab()
+
+    def setup_analytics_tab(self):
+        self.analytics_tab = QWidget()
+        self.tabs.addTab(self.analytics_tab, "数据分析")
+        layout = QVBoxLayout(self.analytics_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+
+        container = QWidget()
+        scroll.setWidget(container)
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(16, 16, 16, 16)
+        container_layout.setSpacing(16)
+
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "stats_output"))
+        images = [
+            ("场馆预约热力图", "heatmap.png"),
+            ("用户运动趋势", "user_stats.png"),
+            ("场馆预约统计", "venue_stats.png"),
+        ]
+
+        for title, filename in images:
+            title_label = QLabel(title)
+            title_label.setStyleSheet("font-size: 16px; font-weight: 800;")
+            container_layout.addWidget(title_label)
+
+            img_label = QLabel()
+            img_label.setAlignment(Qt.AlignCenter)
+            img_path = os.path.join(base_dir, filename)
+            pixmap = QPixmap(img_path)
+            if pixmap.isNull():
+                img_label.setText(f"未找到图片：{filename}")
+            else:
+                img_label.setPixmap(pixmap.scaledToWidth(900, Qt.SmoothTransformation))
+            container_layout.addWidget(img_label)
 
     # ---------------- 场馆管理 ---------------- #
     def setup_venue_tab(self):
@@ -379,10 +421,12 @@ class AdminWidget(QWidget):
             QMessageBox.warning(dialog, "错误", "信用分必须是整数")
             return
         
+        new_account = new_account.strip()
         if not new_account:
             QMessageBox.warning(dialog, "错误", "账号不能为空")
             return
 
+        password = password.strip()
         req = {
             "action": "admin_update_user",
             "data": {

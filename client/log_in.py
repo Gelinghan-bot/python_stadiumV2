@@ -41,20 +41,39 @@ class NetworkClient:
             if not self.connect():
                 return {"status": "error", "message": "无法连接到服务器"}
 
+        previous_timeout = None
         try:
             request = {"action": action, "data": data}
             self.client_socket.send(
                 json.dumps(request, ensure_ascii=False).encode("utf-8")
             )
-
-            response_data = self.client_socket.recv(4096).decode("utf-8")
-            return json.loads(response_data)
+            previous_timeout = self.client_socket.gettimeout()
+            self.client_socket.settimeout(5)
+            chunks = []
+            while True:
+                chunk = self.client_socket.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                try:
+                    response_data = b"".join(chunks).decode("utf-8")
+                    return json.loads(response_data)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+            return {"status": "error", "message": "通信错误: 响应不完整"}
         except Exception as e:
             return {"status": "error", "message": f"通信错误: {str(e)}"}
+        finally:
+            if self.client_socket and previous_timeout is not None:
+                self.client_socket.settimeout(previous_timeout)
 
     def close(self):
         if self.client_socket:
-            self.client_socket.close()
+            try:
+                self.client_socket.close()
+            except:
+                pass
+            self.client_socket = None
 
 
 class LoginWindow(QWidget):
@@ -159,10 +178,12 @@ class LoginWindow(QWidget):
 
         card, layout = self.base_card("欢迎回来", "使用学工号登录 GoSport")
 
+        self.server_ip = self.style_line_edit(QLineEdit(), "服务器IP (默认 127.0.0.1)")
         self.login_account = self.style_line_edit(QLineEdit(), "账号（学号/工号）")
         self.login_password = self.style_line_edit(QLineEdit(), "密码")
         self.login_password.setEchoMode(QLineEdit.Password)
 
+        layout.addWidget(self.server_ip)
         layout.addWidget(self.login_account)
         layout.addWidget(self.login_password)
 
@@ -241,6 +262,16 @@ class LoginWindow(QWidget):
         self.setWindowTitle("GoSport - 注册")
 
     def handle_login(self):
+        # 更新服务器 IP
+        ip = self.server_ip.text().strip()
+        # 强制关闭旧连接，以便使用新 IP 重新连接
+        self.network.close()
+        
+        if ip:
+            self.network.host = ip
+        else:
+            self.network.host = "127.0.0.1"
+
         account = self.login_account.text().strip()
         password = self.login_password.text().strip()
 
@@ -266,6 +297,16 @@ class LoginWindow(QWidget):
             QMessageBox.critical(self, "登录失败", resp.get("message", "未知错误"))
 
     def handle_register(self):
+        # 更新服务器 IP (使用登录页面的输入框)
+        ip = self.server_ip.text().strip()
+        # 强制关闭旧连接，以便使用新 IP 重新连接
+        self.network.close()
+
+        if ip:
+            self.network.host = ip
+        else:
+            self.network.host = "127.0.0.1"
+
         account = self.reg_account.text().strip()
         password = self.reg_password.text().strip()
         name = self.reg_name.text().strip()

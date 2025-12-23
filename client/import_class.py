@@ -23,8 +23,8 @@ class TeacherDashboard(QWidget):
         self.on_logout = on_logout
         self.brand_color = "#84cc16"
 
-        self.setWindowTitle(f"教师管理系统 - {self.user['name']}")
-        self.resize(700, 560)
+        # self.setWindowTitle(f"教师管理系统 - {self.user['name']}")
+        # self.resize(700, 560)
         self.setStyleSheet("background-color: #f8fafc; color: #0f172a;")
 
         self.setup_ui()
@@ -94,10 +94,10 @@ class TeacherDashboard(QWidget):
         form_layout.setVerticalSpacing(10)
         form_group.setLayout(form_layout)
 
-        form_layout.addWidget(QLabel("场馆 ID"), 0, 0)
-        self.entry_venue_id = QLineEdit()
-        self.entry_venue_id.setPlaceholderText("如：1")
-        form_layout.addWidget(self.entry_venue_id, 0, 1)
+        form_layout.addWidget(QLabel("场馆名称"), 0, 0)
+        self.combo_venue = QComboBox()
+        form_layout.addWidget(self.combo_venue, 0, 1)
+        self.load_venues()
 
         form_layout.addWidget(QLabel("星期"), 1, 0)
         self.combo_day = QComboBox()
@@ -151,7 +151,8 @@ class TeacherDashboard(QWidget):
         scrollbar.setValue(scrollbar.maximum())
 
     def add_schedule(self):
-        venue_id = self.entry_venue_id.text().strip()
+        venue_id = self.combo_venue.currentData()
+        venue_name = self.combo_venue.currentText()
         day_str = self.combo_day.currentText()
         start_time = self.entry_start_time.text().strip()
         end_time = self.entry_end_time.text().strip()
@@ -171,7 +172,7 @@ class TeacherDashboard(QWidget):
             "end_time": end_time,
         }
 
-        self.log(f"正在请求添加课表: {day_str} {start_time}-{end_time} @ 场馆 {venue_id}...")
+        self.log(f"正在请求添加课表: {day_str} {start_time}-{end_time} @ 场馆 {venue_name}...")
 
         try:
             response = self.network.send_request("add_schedule", data)
@@ -186,6 +187,18 @@ class TeacherDashboard(QWidget):
         except Exception as e:
             self.log(f"❌ 通信错误: {str(e)}")
             QMessageBox.critical(self, "错误", f"通信错误: {str(e)}")
+
+
+    def load_venues(self):
+        self.combo_venue.clear()
+        self.combo_venue.addItem("?????", None)
+        resp = self.network.send_request("admin_get_venues")
+        if resp and resp.get("status") == "success":
+            venues = resp.get("data", [])
+            for v in venues:
+                self.combo_venue.addItem(v["venue_name"], v["venue_id"])
+        else:
+            QMessageBox.warning(self, "??", resp.get("message", "????????"))
 
     def logout(self):
         reply = QMessageBox.question(

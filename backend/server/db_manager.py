@@ -12,6 +12,48 @@ class DBManager:
     def get_connection(self):
         return sqlite3.connect(self.db_path)
 
+    @staticmethod
+    def _normalize_time_str(time_str):
+        parts = time_str.strip().split(":")
+        if len(parts) == 2:
+            hour, minute = parts
+            second = "00"
+        elif len(parts) == 3:
+            hour, minute, second = parts
+        else:
+            raise ValueError("invalid time format")
+        return f"{int(hour):02d}:{int(minute):02d}:{int(second):02d}"
+
+    @staticmethod
+    def _time_to_seconds(time_str):
+        normalized = DBManager._normalize_time_str(time_str)
+        hour, minute, second = normalized.split(":")
+        return int(hour) * 3600 + int(minute) * 60 + int(second)
+
+    @staticmethod
+    def _iter_hour_blocks(start_time, end_time):
+        import datetime
+        start_norm = DBManager._normalize_time_str(start_time)
+        end_norm = DBManager._normalize_time_str(end_time)
+        start_dt = datetime.datetime.strptime(start_norm, "%H:%M:%S")
+        end_dt = datetime.datetime.strptime(end_norm, "%H:%M:%S")
+        if end_dt <= start_dt:
+            raise ValueError("end_time must be after start_time")
+        start_floor = start_dt.replace(minute=0, second=0)
+        if start_floor > start_dt:
+            start_floor -= datetime.timedelta(hours=1)
+        if end_dt.minute == 0 and end_dt.second == 0:
+            end_ceil = end_dt
+        else:
+            end_ceil = end_dt.replace(minute=0, second=0) + datetime.timedelta(hours=1)
+        blocks = []
+        current = start_floor
+        while current < end_ceil:
+            next_dt = current + datetime.timedelta(hours=1)
+            blocks.append((current.strftime("%H:%M:%S"), next_dt.strftime("%H:%M:%S")))
+            current = next_dt
+        return blocks
+
     def validate_login(self, account, password):
         """
         验证登录
@@ -189,23 +231,56 @@ class DBManager:
         cursor = conn.cursor()
         try:
             import datetime
-            # 1. 检查用户信用分
-            cursor.execute("SELECT credit_score FROM users WHERE user_account=?", (user_account,))
+            # 1. 检查用户信用分与角色
+            cursor.execute("SELECT credit_score, role FROM users WHERE user_account=?", (user_account,))
             user_res = cursor.fetchone()
             if not user_res:
                 return False, "用户不存在"
-            credit_score = user_res[0]
+            credit_score, role = user_res
             
             # 逻辑：信用分限制 (低于60分禁止预约)
             if credit_score <= 60:
                 return False, "您的信用分过低(≤60)，已被禁止预约。请等待一周后恢复。"
             
             # 2. 检查时间段状态 (容量、是否热门)
-            cursor.execute("SELECT current_reservations, max_reservations, is_hot, start_time, date FROM time_slots WHERE slot_id=?", (slot_id,))
+            cursor.execute("""
+                SELECT ts.current_reservations, ts.max_reservations, ts.is_hot,
+                       ts.start_time, ts.end_time, ts.date, c.venue_id
+                FROM time_slots ts
+                JOIN courts c ON ts.court_id = c.court_id
+                WHERE ts.slot_id = ?
+            """, (slot_id,))
             slot_res = cursor.fetchone()
             if not slot_res:
                 return False, "时间段不存在"
-            current_res, max_res, is_hot, start_time, date_str = slot_res
+            current_res, max_res, is_hot, start_time, end_time, date_str, venue_id = slot_res
+            
+            if role == "student":
+                try:
+                    slot_start = self._normalize_time_str(start_time)
+                    slot_end = self._normalize_time_str(end_time)
+                except ValueError:
+                    return False, "时间段格式异常"
+                slot_start_sec = self._time_to_seconds(slot_start)
+                slot_end_sec = self._time_to_seconds(slot_end)
+                slot_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+                slot_weekday = slot_date.weekday()
+
+                cursor.execute("""
+                    SELECT start_time, end_time, end_date
+                    FROM class_schedules
+                    WHERE venue_id = ? AND day_of_week = ? AND (end_date IS NULL OR end_date >= ?)
+                """, (venue_id, slot_weekday, date_str))
+                for sched_start, sched_end, sched_end_date in cursor.fetchall():
+                    try:
+                        sched_start_norm = self._normalize_time_str(sched_start)
+                        sched_end_norm = self._normalize_time_str(sched_end)
+                    except ValueError:
+                        continue
+                    sched_start_sec = self._time_to_seconds(sched_start_norm)
+                    sched_end_sec = self._time_to_seconds(sched_end_norm)
+                    if sched_start_sec < slot_end_sec and sched_end_sec > slot_start_sec:
+                        return False, "该时段已被教师课表占用，暂不可预约"
             
             # --- 热门时段信用分优先排队逻辑 ---
             # 判断是否为指定热门时段: 周六/周日 19:00-21:00 且 max_reservations > 1
@@ -410,6 +485,13 @@ class DBManager:
             import datetime
             import calendar
             
+            try:
+                start_time = self._normalize_time_str(start_time)
+                end_time = self._normalize_time_str(end_time)
+                time_blocks = self._iter_hour_blocks(start_time, end_time)
+            except ValueError:
+                return False, "时间格式错误，应为 HH:MM 或 HH:MM:SS"
+            
             # 1. 验证身份
             cursor.execute("SELECT role FROM users WHERE user_account=?", (teacher_account,))
             user = cursor.fetchone()
@@ -449,55 +531,68 @@ class DBManager:
                     
                     # 对该场馆下的每一个场地进行锁定
                     for court_id in court_ids:
-                        # 检查时间段是否存在
-                        cursor.execute("""
-                            SELECT slot_id, max_reservations, current_reservations 
-                            FROM time_slots 
-                            WHERE court_id = ? AND date = ? AND start_time = ? AND end_time = ?
-                        """, (court_id, date_str, start_time, end_time))
-                        
-                        slot_res = cursor.fetchone()
-                        
-                        if slot_res:
-                            # --- 情况A: 时间段已存在 ---
-                            s_id, s_max, s_curr = slot_res
-                            
-                            # A1. 取消冲突预约
+                        for block_start, block_end in time_blocks:
+                            start_prefix = f"{block_start[:5]}%"
+                            end_prefix = f"{block_end[:5]}%"
+                            # 检查时间段是否存在
                             cursor.execute("""
-                                UPDATE reservations 
-                                SET status = 'cancelled_by_teacher', cancel_time = ?
-                                WHERE slot_id = ? AND user_account != ? AND status = 'confirmed'
-                            """, (datetime.datetime.now(), s_id, teacher_account))
+                                SELECT slot_id, max_reservations, current_reservations 
+                                FROM time_slots 
+                                WHERE court_id = ? AND date = ? AND start_time LIKE ? AND end_time LIKE ?
+                            """, (court_id, date_str, start_prefix, end_prefix))
                             
-                            # A2. 锁定场地
-                            cursor.execute("""
-                                UPDATE time_slots 
-                                SET current_reservations = ? 
-                                WHERE slot_id = ?
-                            """, (s_max, s_id))
+                            slot_rows = cursor.fetchall()
                             
-                        else:
-                            # --- 情况B: 时间段不存在 (按需生成) ---
-                            s_max = 1 # 默认容量
-                            
-                            cursor.execute("""
-                                INSERT INTO time_slots (court_id, date, start_time, end_time, max_reservations, current_reservations, is_hot)
-                                VALUES (?, ?, ?, ?, ?, ?, 0)
-                            """, (court_id, date_str, start_time, end_time, s_max, s_max)) # 直接设为满员
-                            s_id = cursor.lastrowid
+                            if slot_rows:
+                                # --- 情况A: 时间段已存在 ---
+                                for s_id, s_max, s_curr in slot_rows:
+                                    # A1. 取消冲突预约
+                                    cursor.execute("""
+                                        UPDATE reservations 
+                                        SET status = 'cancelled_by_teacher', cancel_time = ?
+                                        WHERE slot_id = ? AND user_account != ? AND status = 'confirmed'
+                                    """, (datetime.datetime.now(), s_id, teacher_account))
+                                    
+                                    # A2. 锁定场地
+                                    cursor.execute("""
+                                        UPDATE time_slots 
+                                        SET current_reservations = ? 
+                                        WHERE slot_id = ?
+                                    """, (s_max, s_id))
+                                    
+                                    # A3. 为教师创建预约
+                                    cursor.execute("""
+                                        SELECT reservation_id FROM reservations 
+                                        WHERE slot_id = ? AND user_account = ? AND status = 'confirmed'
+                                    """, (s_id, teacher_account))
+                                    
+                                    if not cursor.fetchone():
+                                        cursor.execute("""
+                                            INSERT INTO reservations (user_account, slot_id, status, create_time)
+                                            VALUES (?, ?, 'confirmed', ?)
+                                        """, (teacher_account, s_id, datetime.datetime.now()))
+                                
+                            else:
+                                # --- 情况B: 时间段不存在 (按需生成) ---
+                                s_max = 1 # 默认容量
+                                
+                                cursor.execute("""
+                                    INSERT INTO time_slots (court_id, date, start_time, end_time, max_reservations, current_reservations, is_hot)
+                                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                                """, (court_id, date_str, block_start, block_end, s_max, s_max)) # 直接设为满员
+                                s_id = cursor.lastrowid
 
-                        # --- 公共步骤: 为教师创建预约 ---
-                        # 检查是否已预约
-                        cursor.execute("""
-                            SELECT reservation_id FROM reservations 
-                            WHERE slot_id = ? AND user_account = ? AND status = 'confirmed'
-                        """, (s_id, teacher_account))
-                        
-                        if not cursor.fetchone():
-                            cursor.execute("""
-                                INSERT INTO reservations (user_account, slot_id, status, create_time)
-                                VALUES (?, ?, 'confirmed', ?)
-                            """, (teacher_account, s_id, datetime.datetime.now()))
+                                # --- 为教师创建预约 ---
+                                cursor.execute("""
+                                    SELECT reservation_id FROM reservations 
+                                    WHERE slot_id = ? AND user_account = ? AND status = 'confirmed'
+                                """, (s_id, teacher_account))
+                                
+                                if not cursor.fetchone():
+                                    cursor.execute("""
+                                        INSERT INTO reservations (user_account, slot_id, status, create_time)
+                                        VALUES (?, ?, 'confirmed', ?)
+                                    """, (teacher_account, s_id, datetime.datetime.now()))
 
                 # 移动到下一天
                 current_date += datetime.timedelta(days=1)
@@ -523,12 +618,18 @@ class DBManager:
             
             # 1. 获取课表详情以用于查找受影响的 slot
             # 注意：这里需要获取 end_date，以便知道当初锁定了多久
-            cursor.execute("SELECT court_id, day_of_week, start_time, end_time, end_date FROM class_schedules WHERE schedule_id=?", (schedule_id,))
+            cursor.execute("SELECT venue_id, day_of_week, start_time, end_time, end_date FROM class_schedules WHERE schedule_id=?", (schedule_id,))
             schedule = cursor.fetchone()
             if not schedule:
                 return False, "课表不存在"
             
-            court_id, day_of_week, start_time, end_time, end_date_str = schedule
+            venue_id, day_of_week, start_time, end_time, end_date_str = schedule
+            try:
+                start_time = self._normalize_time_str(start_time)
+                end_time = self._normalize_time_str(end_time)
+                time_blocks = self._iter_hour_blocks(start_time, end_time)
+            except ValueError:
+                return False, "课表时间格式错误"
             
             # 2. 删除课表记录
             cursor.execute("DELETE FROM class_schedules WHERE schedule_id=?", (schedule_id,))
@@ -545,54 +646,59 @@ class DBManager:
                 day = min(today.day, calendar.monthrange(year, month)[1])
                 end_date_str = datetime.date(year, month, day).strftime('%Y-%m-%d')
 
-            cursor.execute("""
-                SELECT slot_id, date, start_time, end_time 
-                FROM time_slots 
-                WHERE court_id = ? AND date >= ? AND date <= ?
-            """, (court_id, today_str, end_date_str))
+            cursor.execute("SELECT court_id FROM courts WHERE venue_id = ?", (venue_id,))
+            courts = cursor.fetchall()
+            court_ids = [c[0] for c in courts]
             
-            slots = cursor.fetchall()
-            
-            for slot in slots:
-                s_id, s_date_str, s_start, s_end = slot
-                
-                if s_start[:5] != start_time[:5] or s_end[:5] != end_time[:5]:
-                    continue
-                
-                s_date = datetime.datetime.strptime(s_date_str, '%Y-%m-%d').date()
-                if s_date.weekday() != day_of_week:
-                    continue
-                
-                # --- 匹配成功，执行解锁逻辑 ---
-                
-                # 检查该时间段是否确实被该教师预约了 (避免误操作其他人的预约)
-                cursor.execute("""
-                    SELECT reservation_id FROM reservations 
-                    WHERE slot_id = ? AND user_account = ? AND status = 'confirmed'
-                """, (s_id, teacher_account))
-                
-                if cursor.fetchone():
-                    # A. 取消教师的预约
+            for court_id in court_ids:
+                for block_start, block_end in time_blocks:
+                    start_prefix = f"{block_start[:5]}%"
+                    end_prefix = f"{block_end[:5]}%"
                     cursor.execute("""
-                        UPDATE reservations 
-                        SET status = 'cancelled', cancel_time = ?
-                        WHERE slot_id = ? AND user_account = ? AND status = 'confirmed'
-                    """, (datetime.datetime.now(), s_id, teacher_account))
+                        SELECT slot_id, date, start_time, end_time 
+                        FROM time_slots 
+                        WHERE court_id = ? AND date >= ? AND date <= ? AND start_time LIKE ? AND end_time LIKE ?
+                    """, (court_id, today_str, end_date_str, start_prefix, end_prefix))
                     
-                    # B. 重置场地状态
-                    # 只有在确认是教师锁定的情况下才重置
-                    cursor.execute("""
-                        UPDATE time_slots 
-                        SET current_reservations = 0 
-                        WHERE slot_id = ?
-                    """, (s_id,))
+                    slots = cursor.fetchall()
+                    
+                    for slot in slots:
+                        s_id, s_date_str, s_start, s_end = slot
+                        
+                        s_date = datetime.datetime.strptime(s_date_str, '%Y-%m-%d').date()
+                        if s_date.weekday() != day_of_week:
+                            continue
+                        
+                        # --- 匹配成功，执行解锁逻辑 ---
+                        
+                        # 检查该时间段是否确实被该教师预约了 (避免误操作其他人的预约)
+                        cursor.execute("""
+                            SELECT reservation_id FROM reservations 
+                            WHERE slot_id = ? AND user_account = ? AND status = 'confirmed'
+                        """, (s_id, teacher_account))
+                        
+                        if cursor.fetchone():
+                            # A. 取消教师的预约
+                            cursor.execute("""
+                                UPDATE reservations 
+                                SET status = 'cancelled', cancel_time = ?
+                                WHERE slot_id = ? AND user_account = ? AND status = 'confirmed'
+                            """, (datetime.datetime.now(), s_id, teacher_account))
+                            
+                            # B. 重置场地状态
+                            # 只有在确认是教师锁定的情况下才重置
+                            cursor.execute("""
+                                UPDATE time_slots 
+                                SET current_reservations = 0 
+                                WHERE slot_id = ?
+                            """, (s_id,))
 
-                    # 如果该时间段在未来3天之外，直接删除该 time_slot 记录,如果在3天内，则保留（因为普通用户可见可约）
-                    max_rolling_date = today + datetime.timedelta(days=2)
-                    s_date_obj = datetime.datetime.strptime(s_date_str, '%Y-%m-%d').date()
-                    
-                    if s_date_obj > max_rolling_date:
-                        cursor.execute("DELETE FROM time_slots WHERE slot_id = ?", (s_id,))
+                            # 如果该时间段在未来3天之外，直接删除该 time_slot 记录,如果在3天内，则保留（因为普通用户可见可约）
+                            max_rolling_date = today + datetime.timedelta(days=2)
+                            s_date_obj = datetime.datetime.strptime(s_date_str, '%Y-%m-%d').date()
+                            
+                            if s_date_obj > max_rolling_date:
+                                cursor.execute("DELETE FROM time_slots WHERE slot_id = ?", (s_id,))
             
             conn.commit()
             return True, "课表移除成功，场地已释放"
@@ -799,7 +905,7 @@ class DBManager:
             return
 
         # 遍历未来3天 (1, 2, 3)
-        for i in range(1, 4):
+        for i in range(3):
             target_date = today_date + datetime.timedelta(days=i)
             date_str = target_date.strftime("%Y-%m-%d")
             
@@ -971,6 +1077,14 @@ class DBManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
+            if password is not None:
+                password = password.strip()
+            
+            if new_account:
+                new_account = new_account.strip()
+            if old_account:
+                old_account = old_account.strip()
+
             # 1. 如果修改了账号，先检查新账号是否存在
             if new_account and new_account != old_account:
                 cursor.execute("SELECT 1 FROM users WHERE user_account=?", (new_account,))
@@ -997,6 +1111,9 @@ class DBManager:
             
             sql = f"UPDATE users SET {', '.join(update_fields)} WHERE user_account=?"
             cursor.execute(sql, params)
+            if cursor.rowcount == 0:
+                conn.rollback()
+                return False, "用户不存在或更新失败"
 
             # 3. 如果修改了账号，需要手动更新所有关联表 (因为 SQLite 默认不开启 FK 级联更新)
             if new_account and new_account != old_account:
@@ -1008,6 +1125,15 @@ class DBManager:
                 cursor.execute("UPDATE announcements SET author_account=? WHERE author_account=?", (new_account, old_account))
                 # 更新 class_schedules
                 cursor.execute("UPDATE class_schedules SET teacher_account=? WHERE teacher_account=?", (new_account, old_account))
+
+            if password:
+                target_account = new_account if new_account and new_account != old_account else old_account
+                # 验证密码是否更新成功 (可选，但为了保险起见)
+                # cursor.execute("SELECT password FROM users WHERE user_account=?", (target_account,))
+                # pwd_row = cursor.fetchone()
+                # if not pwd_row or pwd_row[0] != password:
+                #     conn.rollback()
+                #     return False, "密码更新失败"
 
             conn.commit()
             return True, "更新成功"
@@ -1067,20 +1193,26 @@ class DBManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            import datetime
-            # 获取 slot_id
-            cursor.execute("SELECT slot_id FROM reservations WHERE reservation_id=?", (reservation_id,))
+            # 获取 slot_id 与状态
+            cursor.execute("SELECT slot_id, status FROM reservations WHERE reservation_id=?", (reservation_id,))
             res = cursor.fetchone()
             if not res:
                 return False, "预约不存在"
-            slot_id = res[0]
+            slot_id, status = res
 
-            # 更新状态
-            cursor.execute("UPDATE reservations SET status='cancelled_by_admin', cancel_time=? WHERE reservation_id=?", 
-                           (datetime.datetime.now(), reservation_id))
+            # 删除预约记录
+            cursor.execute("DELETE FROM reservations WHERE reservation_id=?", (reservation_id,))
             
-            # 释放名额
-            cursor.execute("UPDATE time_slots SET current_reservations = current_reservations - 1 WHERE slot_id=?", (slot_id,))
+            # 释放名额（仅对占用名额的状态）
+            if status in ("confirmed", "checked_in", "no_show"):
+                cursor.execute("""
+                    UPDATE time_slots
+                    SET current_reservations = CASE
+                        WHEN current_reservations > 0 THEN current_reservations - 1
+                        ELSE 0
+                    END
+                    WHERE slot_id = ?
+                """, (slot_id,))
             
             conn.commit()
             return True, "取消成功"
