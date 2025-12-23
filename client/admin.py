@@ -333,6 +333,14 @@ class AdminWidget(QWidget):
         dialog.setWindowTitle(f"编辑用户 - {user['account']}")
         layout = QFormLayout(dialog)
 
+        # 账号 (允许修改)
+        account_edit = QLineEdit(user["account"])
+        
+        # 密码 (留空不修改)
+        password_edit = QLineEdit()
+        password_edit.setPlaceholderText("留空则不修改密码")
+        password_edit.setEchoMode(QLineEdit.Password)
+
         name_edit = QLineEdit(user["name"])
         role_combo = QComboBox()
         role_combo.addItems(["student", "teacher", "admin"])
@@ -340,6 +348,8 @@ class AdminWidget(QWidget):
         phone_edit = QLineEdit(user["phone"])
         score_edit = QLineEdit(str(user["credit_score"]))
 
+        layout.addRow("账号:", account_edit)
+        layout.addRow("新密码:", password_edit)
         layout.addRow("姓名:", name_edit)
         layout.addRow("角色:", role_combo)
         layout.addRow("电话:", phone_edit)
@@ -347,27 +357,49 @@ class AdminWidget(QWidget):
 
         btn_save = QPushButton("保存")
         btn_save.clicked.connect(
-            lambda: self.submit_edit_user(dialog, user["account"], name_edit.text(), role_combo.currentText(), phone_edit.text(), score_edit.text())
+            lambda: self.submit_edit_user(
+                dialog, 
+                user["account"], # old_account
+                account_edit.text(), # new_account
+                password_edit.text(), # password
+                name_edit.text(), 
+                role_combo.currentText(), 
+                phone_edit.text(), 
+                score_edit.text()
+            )
         )
         layout.addRow(btn_save)
 
         dialog.exec_()
 
-    def submit_edit_user(self, dialog, account, name, role, phone, score):
+    def submit_edit_user(self, dialog, old_account, new_account, password, name, role, phone, score):
         try:
             score_int = int(score)
         except ValueError:
             QMessageBox.warning(dialog, "错误", "信用分必须是整数")
             return
+        
+        if not new_account:
+            QMessageBox.warning(dialog, "错误", "账号不能为空")
+            return
 
         req = {
             "action": "admin_update_user",
-            "data": {"account": account, "name": name, "role": role, "phone": phone, "credit_score": score_int},
+            "data": {
+                "old_account": old_account,
+                "new_account": new_account,
+                "password": password,
+                "name": name, 
+                "role": role, 
+                "phone": phone, 
+                "credit_score": score_int
+            },
         }
         res = self.network.send_request(req)
         if res and res.get("status") == "success":
             QMessageBox.information(dialog, "成功", "更新成功")
             dialog.accept()
+            self.load_users() # 刷新列表
             self.load_users()
         else:
             QMessageBox.warning(dialog, "错误", res.get("message", "更新失败"))

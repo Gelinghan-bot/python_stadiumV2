@@ -786,12 +786,15 @@ class DBManager:
         print(f"[Task] 已清理未使用的过期号源: {deleted_count} 条 (保留了有历史订单的号源)")
         
         # 2. 生成未来3天号源
-        # 获取所有场地
-        cursor.execute("SELECT court_id FROM courts")
+        # 获取所有场地及其所属场馆名称
+        cursor.execute("""
+            SELECT c.court_id, v.venue_name 
+            FROM courts c
+            JOIN venues v ON c.venue_id = v.venue_id
+        """)
         courts = cursor.fetchall()
-        court_ids = [c[0] for c in courts]
         
-        if not court_ids:
+        if not courts:
             print("[Task] 无场地，跳过生成")
             return
 
@@ -805,7 +808,14 @@ class DBManager:
                 start_time = f"{h:02d}:00:00"
                 end_time = f"{h+1:02d}:00:00"
                 
-                for cid in court_ids:
+                for cid, v_name in courts:
+                    # 根据场馆类型设置最大预约人数
+                    # 健身房和游泳馆容量为100，其他场馆（如羽毛球、网球等）为1
+                    if v_name in ["健身房", "游泳馆"]:
+                        max_res = 100
+                    else:
+                        max_res = 1
+
                     # 检查是否存在
                     cursor.execute("""
                         SELECT slot_id FROM time_slots 
@@ -816,8 +826,8 @@ class DBManager:
                         # 插入新号源
                         cursor.execute("""
                             INSERT INTO time_slots (court_id, date, start_time, end_time, max_reservations, current_reservations, is_hot)
-                            VALUES (?, ?, ?, ?, 8, 0, 0)
-                        """, (cid, date_str, start_time, end_time))
+                            VALUES (?, ?, ?, ?, ?, 0, 0)
+                        """, (cid, date_str, start_time, end_time, max_res))
         
         print("[Task] time_slots自动生成&删除维护已完成")
 
@@ -954,16 +964,55 @@ class DBManager:
         finally:
             conn.close()
 
-    def admin_update_user(self, account, name, role, phone, credit_score):
-        """更新用户信息"""
+    def admin_update_user(self, old_account, new_account, password, name, role, phone, credit_score):
+        """
+        更新用户信息 (支持修改账号和密码)
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("UPDATE users SET name=?, role=?, phone=?, credit_score=? WHERE user_account=?",
-                           (name, role, phone, credit_score, account))
+            # 1. 如果修改了账号，先检查新账号是否存在
+            if new_account and new_account != old_account:
+                cursor.execute("SELECT 1 FROM users WHERE user_account=?", (new_account,))
+                if cursor.fetchone():
+                    return False, "新账号已存在"
+
+            # 2. 构建更新语句
+            # 基本字段
+            update_fields = ["name=?", "role=?", "phone=?", "credit_score=?"]
+            params = [name, role, phone, credit_score]
+
+            # 如果有新密码
+            if password:
+                update_fields.append("password=?")
+                params.append(password)
+
+            # 如果修改了账号
+            if new_account and new_account != old_account:
+                update_fields.append("user_account=?")
+                params.append(new_account)
+            
+            # WHERE 条件使用旧账号
+            params.append(old_account)
+            
+            sql = f"UPDATE users SET {', '.join(update_fields)} WHERE user_account=?"
+            cursor.execute(sql, params)
+
+            # 3. 如果修改了账号，需要手动更新所有关联表 (因为 SQLite 默认不开启 FK 级联更新)
+            if new_account and new_account != old_account:
+                # 更新 reservations
+                cursor.execute("UPDATE reservations SET user_account=? WHERE user_account=?", (new_account, old_account))
+                # 更新 credit_logs
+                cursor.execute("UPDATE credit_logs SET user_account=? WHERE user_account=?", (new_account, old_account))
+                # 更新 announcements
+                cursor.execute("UPDATE announcements SET author_account=? WHERE author_account=?", (new_account, old_account))
+                # 更新 class_schedules
+                cursor.execute("UPDATE class_schedules SET teacher_account=? WHERE teacher_account=?", (new_account, old_account))
+
             conn.commit()
             return True, "更新成功"
         except Exception as e:
+            conn.rollback()
             return False, str(e)
         finally:
             conn.close()

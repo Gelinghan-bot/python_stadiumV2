@@ -357,12 +357,19 @@ class SportsVenueServer:
             return {"status": "fail", "message": result}
 
     def handle_admin_update_user(self, data):
-        account = data.get('account')
+        old_account = data.get('old_account') # 原账号
+        new_account = data.get('new_account') # 新账号 (可选)
+        password = data.get('password')       # 新密码 (可选)
         name = data.get('name')
         role = data.get('role')
         phone = data.get('phone')
         credit_score = data.get('credit_score')
-        success, message = self.db_manager.admin_update_user(account, name, role, phone, credit_score)
+        
+        # 兼容旧接口：如果只传了 account，视为 old_account
+        if not old_account and data.get('account'):
+            old_account = data.get('account')
+
+        success, message = self.db_manager.admin_update_user(old_account, new_account, password, name, role, phone, credit_score)
         if success:
             return {"status": "success", "message": message}
         else:
