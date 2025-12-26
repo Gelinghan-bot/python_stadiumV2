@@ -485,10 +485,9 @@ class SportsVenueServer:
             print("[Scheduler] 定时任务线程已启动")
             while self.running:
                 now = datetime.datetime.now()
-                # 每天晚上 22:00 执行 (这里为了演示，可以设为每分钟检查一次，或者严格判断时间)
-                # 简单逻辑: 每分钟检查一次，如果是 22:00 则执行
-                if now.hour >= 22 and now.minute >= 0:
-                    print(f"[Scheduler] 开始执行每日检查爽约任务 @ {now}")
+                # 每小时的 00 分执行一次 (例如 10:00, 11:00, 12:00...)
+                if now.minute == 0:
+                    print(f"[Scheduler] 开始执行定时维护任务 @ {now}")
                     self.db_manager.process_daily_tasks()
                     # 休眠 61 秒防止重复执行
                     time.sleep(61)
@@ -506,6 +505,10 @@ class SportsVenueServer:
             self.server_socket.listen(5)
             print(f"[*] 服务器已启动，监听 {self.host}:{self.port}")
             
+            # 启动时立即执行一次维护任务 (确保号源更新)
+            print("[*] 正在执行启动时自检维护...")
+            self.db_manager.process_daily_tasks()
+
             # 启动定时任务
             self.start_scheduler()
             
