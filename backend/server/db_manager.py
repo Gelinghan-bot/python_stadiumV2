@@ -904,8 +904,8 @@ class DBManager:
             print("[Task] 无场地，跳过生成")
             return
 
-        # 遍历未来3天 (1, 2, 3)
-        for i in range(1,4):
+        # 遍历未来3天 (今天、明天、后天)
+        for i in range(3):
             target_date = today_date + datetime.timedelta(days=i)
             date_str = target_date.strftime("%Y-%m-%d")
             
