@@ -485,7 +485,7 @@ class SportsVenueServer:
             print("[Scheduler] 定时任务线程已启动")
             while self.running:
                 now = datetime.datetime.now()
-                # 每小时的 00 分执行一次 (例如 10:00, 11:00, 12:00...)
+                # 每小时执行一次 (例如 10:00, 11:00, 12:00...)
                 if now.minute == 0:
                     print(f"[Scheduler] 开始执行定时维护任务 @ {now}")
                     self.db_manager.process_daily_tasks()
