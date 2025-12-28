@@ -747,13 +747,34 @@ class DBManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            # 检查预约状态
-            cursor.execute("SELECT status FROM reservations WHERE reservation_id=? AND user_account=?", (reservation_id, user_account))
+            # 检查预约状态与时间窗口
+            cursor.execute("""
+                SELECT r.status, ts.date, ts.start_time, ts.end_time
+                FROM reservations r
+                JOIN time_slots ts ON r.slot_id = ts.slot_id
+                WHERE r.reservation_id = ? AND r.user_account = ?
+            """, (reservation_id, user_account))
             res = cursor.fetchone()
             if not res:
                 return False, "预约不存在"
-            if res[0] != 'confirmed':
-                return False, f"当前状态({res[0]})无法签到"
+            status, date_str, start_time, end_time = res
+            if status != 'confirmed':
+                return False, f"当前状态({status})无法签到"
+
+            import datetime
+            try:
+                start_norm = self._normalize_time_str(start_time)
+                end_norm = self._normalize_time_str(end_time)
+                start_dt = datetime.datetime.strptime(f"{date_str} {start_norm}", "%Y-%m-%d %H:%M:%S")
+                end_dt = datetime.datetime.strptime(f"{date_str} {end_norm}", "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return False, "预约时间格式异常"
+
+            now = datetime.datetime.now()
+            if now < start_dt:
+                return False, "签到时间未到，请在预约开始后签到"
+            if now > end_dt:
+                return False, "签到时间已过"
             
             # 更新状态为 checked_in
             cursor.execute("UPDATE reservations SET status='checked_in' WHERE reservation_id=?", (reservation_id,))
@@ -885,7 +906,7 @@ class DBManager:
         # 这样既能清理垃圾数据，又能保证用户能查到历史订单
         cursor.execute("""
             DELETE FROM time_slots 
-            WHERE date <= ? 
+            WHERE date < ? 
             AND slot_id NOT IN (SELECT DISTINCT slot_id FROM reservations)
         """, (today_date,))
         deleted_count = cursor.rowcount

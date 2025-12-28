@@ -1,3 +1,4 @@
+import io
 import os
 from PyQt5.QtWidgets import (
     QComboBox,
@@ -68,27 +69,220 @@ class AdminWidget(QWidget):
         container_layout.setContentsMargins(16, 16, 16, 16)
         container_layout.setSpacing(16)
 
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "stats_output"))
-        images = [
+        control_row = QHBoxLayout()
+        control_row.addWidget(QLabel("用户账号"))
+        self.stats_user_input = QLineEdit()
+        self.stats_user_input.setPlaceholderText("用于生成个人运动趋势图")
+        self.stats_user_input.setText(self.user_info.get("account", ""))
+        control_row.addWidget(self.stats_user_input)
+
+        refresh_btn = QPushButton("刷新图表")
+        refresh_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {self.brand_color};
+                color: white;
+                border: none;
+                padding: 8px 14px;
+                border-radius: 8px;
+                font-weight: 800;
+            }}
+            QPushButton:hover {{ background-color: #65a30d; }}
+            """
+        )
+        refresh_btn.clicked.connect(self.refresh_analytics_images)
+        control_row.addWidget(refresh_btn)
+        control_row.addStretch(1)
+        container_layout.addLayout(control_row)
+
+        self.analytics_output_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "stats_output")
+        )
+        self.analytics_use_disk = False
+        self.analytics_show_heatmap_values = True
+        self.analytics_images = [
             ("场馆预约热力图", "heatmap.png"),
             ("用户运动趋势", "user_stats.png"),
             ("场馆预约统计", "venue_stats.png"),
         ]
+        self.analytics_image_labels = {}
+        self.analytics_pixmaps = {}
 
-        for title, filename in images:
+        for title, filename in self.analytics_images:
             title_label = QLabel(title)
             title_label.setStyleSheet("font-size: 16px; font-weight: 800;")
             container_layout.addWidget(title_label)
 
             img_label = QLabel()
             img_label.setAlignment(Qt.AlignCenter)
-            img_path = os.path.join(base_dir, filename)
+            container_layout.addWidget(img_label)
+            self.analytics_image_labels[filename] = img_label
+
+        self.refresh_analytics_images()
+
+    def refresh_analytics_images(self):
+        if not self.generate_analytics_images():
+            return
+        if self.analytics_use_disk:
+            self.load_analytics_images()
+        else:
+            self.apply_analytics_pixmaps()
+
+    def load_analytics_images(self):
+        for _, filename in self.analytics_images:
+            img_label = self.analytics_image_labels.get(filename)
+            if not img_label:
+                continue
+            img_path = os.path.join(self.analytics_output_dir, filename)
             pixmap = QPixmap(img_path)
             if pixmap.isNull():
                 img_label.setText(f"未找到图片：{filename}")
             else:
                 img_label.setPixmap(pixmap.scaledToWidth(900, Qt.SmoothTransformation))
-            container_layout.addWidget(img_label)
+
+    def apply_analytics_pixmaps(self):
+        for _, filename in self.analytics_images:
+            img_label = self.analytics_image_labels.get(filename)
+            if not img_label:
+                continue
+            pixmap = self.analytics_pixmaps.get(filename)
+            if not pixmap or pixmap.isNull():
+                img_label.setText(f"未生成图片：{filename}")
+            else:
+                img_label.setPixmap(pixmap.scaledToWidth(900, Qt.SmoothTransformation))
+
+    def generate_analytics_images(self):
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"图表依赖缺失: {e}")
+            return False
+
+        matplotlib.rcParams["font.sans-serif"] = ["SimHei"]
+        matplotlib.rcParams["axes.unicode_minus"] = False
+
+        self.analytics_pixmaps = {}
+        os.makedirs(self.analytics_output_dir, exist_ok=True)
+
+        def finalize_figure(filename, fig):
+            if self.analytics_use_disk:
+                path = os.path.join(self.analytics_output_dir, filename)
+                fig.savefig(path)
+                plt.close(fig)
+                return
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png")
+            plt.close(fig)
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            self.analytics_pixmaps[filename] = pixmap
+
+        def save_empty_chart(path, title, message):
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.axis("off")
+            ax.text(0.5, 0.6, title, ha="center", va="center", fontsize=14)
+            ax.text(0.5, 0.4, message, ha="center", va="center", fontsize=12, color="#6b7280")
+            fig.tight_layout()
+            finalize_figure(os.path.basename(path), fig)
+
+        # 1) 场馆预约统计
+        venue_path = os.path.join(self.analytics_output_dir, "venue_stats.png")
+        resp = self.network.send_request("get_venue_stats", {})
+        if not resp or resp.get("status") != "success":
+            message = resp.get("message", "获取失败") if resp else "获取失败"
+            save_empty_chart(venue_path, "场馆预约统计", message)
+        else:
+            data = resp.get("data", [])
+            if not data:
+                save_empty_chart(venue_path, "场馆预约统计", "暂无数据")
+            else:
+                venues = [item.get("venue_name", "") for item in data]
+                counts = [item.get("reservation_count", 0) for item in data]
+                rates = [item.get("utilization_rate", 0) for item in data]
+                fig, ax1 = plt.subplots(figsize=(10, 6))
+                ax1.bar(venues, counts, color="#93c5fd", label="预约次数")
+                ax1.set_xlabel("场馆")
+                ax1.set_ylabel("预约次数", color="#2563eb")
+                ax1.tick_params(axis="y", labelcolor="#2563eb")
+
+                ax2 = ax1.twinx()
+                ax2.plot(venues, rates, color="#ef4444", marker="o", label="预约率(%)")
+                ax2.set_ylabel("预约率 (%)", color="#ef4444")
+                ax2.tick_params(axis="y", labelcolor="#ef4444")
+                plt.title("场馆预约情况统计")
+                fig.tight_layout()
+                finalize_figure("venue_stats.png", fig)
+
+        # 2) 热力图
+        heatmap_path = os.path.join(self.analytics_output_dir, "heatmap.png")
+        resp = self.network.send_request("get_heatmap_data", {})
+        if not resp or resp.get("status") != "success":
+            message = resp.get("message", "获取失败") if resp else "获取失败"
+            save_empty_chart(heatmap_path, "场馆预约热力图", message)
+        else:
+            result = resp.get("data", {})
+            x_labels = result.get("x_axis", [])
+            y_labels = result.get("y_axis", [])
+            raw_data = result.get("data", [])
+            if not x_labels or not y_labels:
+                save_empty_chart(heatmap_path, "场馆预约热力图", "暂无数据")
+            else:
+                matrix = np.zeros((len(y_labels), len(x_labels)))
+                for x, y, val in raw_data:
+                    if 0 <= y < len(y_labels) and 0 <= x < len(x_labels):
+                        matrix[y, x] = val
+                fig, ax = plt.subplots(figsize=(10, 8))
+                im = ax.imshow(matrix, cmap="YlOrRd", aspect="auto")
+                ax.set_xticks(range(len(x_labels)))
+                ax.set_xticklabels(x_labels)
+                ax.set_yticks(range(len(y_labels)))
+                ax.set_yticklabels(y_labels)
+                if self.analytics_show_heatmap_values:
+                    for i in range(len(y_labels)):
+                        for j in range(len(x_labels)):
+                            val = matrix[i, j]
+                            if val > 0:
+                                ax.text(j, i, int(val), ha="center", va="center", color="black")
+                fig.colorbar(im, ax=ax, label="预约热度")
+                ax.set_title("场馆预约热力图 (星期 x 时间段)")
+                fig.tight_layout()
+                finalize_figure("heatmap.png", fig)
+
+        # 3) 用户运动趋势
+        user_path = os.path.join(self.analytics_output_dir, "user_stats.png")
+        user_account = self.stats_user_input.text().strip()
+        if not user_account:
+            save_empty_chart(user_path, "用户运动趋势", "请输入用户账号")
+        else:
+            resp = self.network.send_request(
+                "get_user_stats", {"user_account": user_account}
+            )
+            if not resp or resp.get("status") != "success":
+                message = resp.get("message", "获取失败") if resp else "获取失败"
+                save_empty_chart(user_path, "用户运动趋势", message)
+            else:
+                result = resp.get("data", {})
+                trend = result.get("weekly_trend", {})
+                dates = trend.get("dates", [])
+                counts = trend.get("counts", [])
+                if not dates or not counts:
+                    save_empty_chart(user_path, "用户运动趋势", "暂无数据")
+                else:
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    ax.plot(dates, counts, marker="o", linestyle="-", color="#22c55e")
+                    ax.set_title(f"用户 {user_account} 最近7天运动趋势")
+                    ax.set_xlabel("日期")
+                    ax.set_ylabel("运动次数")
+                    ax.grid(True)
+                    fig.tight_layout()
+                    finalize_figure("user_stats.png", fig)
+
+        return True
 
     # ---------------- 场馆管理 ---------------- #
     def setup_venue_tab(self):

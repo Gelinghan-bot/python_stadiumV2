@@ -3,15 +3,19 @@ from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
     QDateEdit,
+    QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QInputDialog,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
     QMainWindow,
@@ -193,6 +197,7 @@ class HomeWindow(QMainWindow):
         super().__init__()
 
         self.current_user = None  # Track login state
+        self.latest_reservations = []
         self.brand_color = "#84cc16"
         self.dark_text = "#111827"
         self.venue_name_to_id = {
@@ -588,8 +593,21 @@ class HomeWindow(QMainWindow):
 
         # Venue Selection
         self.venue_combo_box, self.venue_combo = self.build_labeled_combo(
-            "场馆", ["请选择场馆", "足球场", "篮球馆", "排球场", "网球场", "羽毛球馆","乒乓球馆","健身房","台球室","游泳馆"]
+            "场馆",
+            [
+                "请选择场馆",
+                "足球场",
+                "篮球馆",
+                "排球场",
+                "网球场",
+                "羽毛球馆",
+                "乒乓球馆",
+                "健身房",
+                "台球室",
+                "游泳馆",
+            ],
         )
+        self.refresh_venue_combo()
 
         # Date Selection
         date_container = QWidget()
@@ -764,26 +782,30 @@ class HomeWindow(QMainWindow):
             v.addWidget(lbl)
         return card
 
+    def action_button(self, text):
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedHeight(40)
+        btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {self.brand_color};
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-weight: 800;
+                padding: 8px 14px;
+            }}
+            QPushButton:hover {{ background-color: #65a30d; }}
+            """
+        )
+        return btn
+
     # ---------------------------- Other Pages ---------------------------- #
     def setup_static_pages(self):
         self.pages = {}
-        self.pages["venues"] = self.build_cards_page(
-            "场馆一览",
-            [
-                ("篮球馆 · 4 块场地", "余量充足 · 提前 3 天可约", "#eef2ff"),
-                ("羽毛球馆 · 12 块场地", "晚间热门，请提前预约", "#ecfeff"),
-                ("游泳馆", "10 条泳道 · 需携带学生证入场", "#fefce8"),
-                ("室外田径场", "全天开放 · 每周一早间维护", "#f0fdf4"),
-            ],
-        )
-        self.pages["announcements"] = self.build_cards_page(
-            "公告 / 论坛",
-            [
-                ("场馆维护", "本周五 18:00-22:00 篮球馆封闭维护", "#fff7ed"),
-                ("预约规则", "爽约将扣信用分，连续 3 次将限制预约 7 天", "#e0f2fe"),
-                ("招募", "羽毛球校队招募助教与陪练", "#fef2f2"),
-            ],
-        )
+        self.pages["venues"] = self.build_venues_page()
+        self.pages["announcements"] = self.build_announcements_page()
         self.pages["events"] = self.build_cards_page(
             "校园赛事",
             [
@@ -815,6 +837,308 @@ class HomeWindow(QMainWindow):
         layout.addLayout(row)
         layout.addStretch(1)
         return page
+
+    def build_venues_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+
+        header = QLabel("场馆一览")
+        header.setStyleSheet("font-size: 22px; font-weight: 900;")
+        layout.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+
+        container = QWidget()
+        self.venues_layout = QVBoxLayout(container)
+        self.venues_layout.setContentsMargins(0, 0, 0, 0)
+        self.venues_layout.setSpacing(12)
+        scroll.setWidget(container)
+
+        self.refresh_venues_page()
+        return page
+
+    def build_venue_card(self, venue):
+        card = QFrame()
+        card.setStyleSheet(
+            """
+            QFrame {
+                background-color: white;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+            """
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+
+        name = QLabel(venue.get("venue_name", "未命名场馆"))
+        name.setStyleSheet("font-size: 16px; font-weight: 800;")
+        layout.addWidget(name)
+
+        venue_type = "室外" if venue.get("is_outdoor") else "室内"
+        location = venue.get("location") or "未填写位置"
+        desc = venue.get("description") or "暂无介绍"
+        meta = QLabel(f"类型：{venue_type} · 位置：{location}")
+        meta.setStyleSheet("color: #6b7280; font-size: 12px;")
+        layout.addWidget(meta)
+
+        desc_label = QLabel(desc)
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #374151;")
+        layout.addWidget(desc_label)
+
+        return card
+
+    def refresh_venues_page(self):
+        if not hasattr(self, "venues_layout"):
+            return
+
+        self.clear_layout(self.venues_layout)
+        try:
+            resp = self.network.send_request("admin_get_venues")
+        except Exception as e:
+            resp = {"status": "error", "message": str(e)}
+
+        if not resp or resp.get("status") != "success":
+            msg = resp.get("message", "场馆信息获取失败")
+            error_label = QLabel(f"场馆信息获取失败：{msg}")
+            error_label.setStyleSheet("color: #ef4444; font-size: 14px;")
+            self.venues_layout.addWidget(error_label)
+            self.venues_layout.addStretch(1)
+            return
+
+        data = resp.get("data", [])
+        if not data:
+            empty_label = QLabel("暂无场馆信息。")
+            empty_label.setStyleSheet("color: #6b7280; font-size: 14px;")
+            self.venues_layout.addWidget(empty_label)
+            self.venues_layout.addStretch(1)
+            return
+
+        for venue in data:
+            self.venues_layout.addWidget(self.build_venue_card(venue))
+        self.venues_layout.addStretch(1)
+
+    def refresh_venue_combo(self, preserve_selection=True):
+        if not self.venue_combo:
+            return False
+
+        current_text = self.venue_combo.currentText() if preserve_selection else None
+        try:
+            resp = self.network.send_request("admin_get_venues")
+        except Exception as e:
+            resp = {"status": "error", "message": str(e)}
+
+        if resp and resp.get("status") == "success":
+            venues = resp.get("data", [])
+            self.venue_combo.blockSignals(True)
+            self.venue_combo.clear()
+            self.venue_combo.addItem("请选择场馆")
+            self.venue_name_to_id = {}
+            for venue in venues:
+                name = venue.get("venue_name")
+                if not name:
+                    continue
+                self.venue_combo.addItem(name)
+                self.venue_name_to_id[name] = venue.get("venue_id")
+            self.venue_combo.blockSignals(False)
+            if preserve_selection and current_text in self.venue_name_to_id:
+                idx = self.venue_combo.findText(current_text)
+                if idx >= 0:
+                    self.venue_combo.setCurrentIndex(idx)
+            return True
+
+        fallback_names = list(self.venue_name_to_id.keys())
+        if not fallback_names:
+            fallback_names = [
+                "足球场",
+                "篮球馆",
+                "排球场",
+                "网球场",
+                "羽毛球馆",
+                "乒乓球馆",
+                "健身房",
+                "台球室",
+                "游泳馆",
+            ]
+        self.venue_combo.blockSignals(True)
+        self.venue_combo.clear()
+        self.venue_combo.addItem("请选择场馆")
+        for name in fallback_names:
+            self.venue_combo.addItem(name)
+        self.venue_combo.blockSignals(False)
+        if preserve_selection and current_text in fallback_names:
+            idx = self.venue_combo.findText(current_text)
+            if idx >= 0:
+                self.venue_combo.setCurrentIndex(idx)
+        return False
+
+    def build_announcements_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+
+        header_row = QHBoxLayout()
+        header = QLabel("公告 / 论坛")
+        header.setStyleSheet("font-size: 22px; font-weight: 900;")
+        header_row.addWidget(header)
+        header_row.addStretch(1)
+        self.post_btn = self.action_button("发帖")
+        self.post_btn.clicked.connect(self.prompt_add_post)
+        header_row.addWidget(self.post_btn)
+        layout.addLayout(header_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+
+        container = QWidget()
+        self.announcements_layout = QVBoxLayout(container)
+        self.announcements_layout.setContentsMargins(0, 0, 0, 0)
+        self.announcements_layout.setSpacing(12)
+        scroll.setWidget(container)
+
+        self.refresh_announcements_page()
+        return page
+
+    def build_announcement_card(self, ann):
+        card = QFrame()
+        card.setStyleSheet(
+            """
+            QFrame {
+                background-color: white;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+            """
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+
+        title = QLabel(ann.get("title", "未命名公告"))
+        title.setStyleSheet("font-size: 16px; font-weight: 800;")
+        layout.addWidget(title)
+
+        author_name = ann.get("author_name") or "管理员"
+        author_role = ann.get("author_role") or "admin"
+        start_date = ann.get("start_date", "")
+        end_date = ann.get("end_date", "")
+        meta = QLabel(f"作者：{author_name} ({author_role}) · 有效期：{start_date} ~ {end_date}")
+        meta.setStyleSheet("color: #6b7280; font-size: 12px;")
+        layout.addWidget(meta)
+
+        content = QLabel(ann.get("content", ""))
+        content.setWordWrap(True)
+        content.setStyleSheet("color: #374151;")
+        layout.addWidget(content)
+
+        return card
+
+    def refresh_announcements_page(self):
+        if not hasattr(self, "announcements_layout"):
+            return
+
+        self.clear_layout(self.announcements_layout)
+        try:
+            resp = self.network.send_request("get_announcements")
+        except Exception as e:
+            resp = {"status": "error", "message": str(e)}
+
+        if not resp or resp.get("status") != "success":
+            msg = resp.get("message", "公告获取失败")
+            error_label = QLabel(f"公告获取失败：{msg}")
+            error_label.setStyleSheet("color: #ef4444; font-size: 14px;")
+            self.announcements_layout.addWidget(error_label)
+            self.announcements_layout.addStretch(1)
+            self.update_post_button_state()
+            return
+
+        data = resp.get("data", [])
+        if not data:
+            empty_label = QLabel("暂无公告。")
+            empty_label.setStyleSheet("color: #6b7280; font-size: 14px;")
+            self.announcements_layout.addWidget(empty_label)
+            self.announcements_layout.addStretch(1)
+            self.update_post_button_state()
+            return
+
+        for ann in data:
+            self.announcements_layout.addWidget(self.build_announcement_card(ann))
+        self.announcements_layout.addStretch(1)
+
+        self.update_post_button_state()
+
+    def update_post_button_state(self):
+        if not hasattr(self, "post_btn"):
+            return
+        if self.current_user:
+            self.post_btn.setEnabled(True)
+            self.post_btn.setText("发帖")
+        else:
+            self.post_btn.setEnabled(True)
+            self.post_btn.setText("登录后发帖")
+
+    def prompt_add_post(self):
+        if not self.current_user:
+            self.open_login_window()
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("发布帖子")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title_label = QLabel("标题")
+        title_edit = QLineEdit()
+        title_edit.setPlaceholderText("请输入标题")
+        layout.addWidget(title_label)
+        layout.addWidget(title_edit)
+
+        content_label = QLabel("内容")
+        content_edit = QTextEdit()
+        content_edit.setPlaceholderText("请输入内容")
+        content_edit.setFixedHeight(180)
+        layout.addWidget(content_label)
+        layout.addWidget(content_edit)
+
+        btn_row = QHBoxLayout()
+        submit_btn = self.action_button("发布")
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addWidget(submit_btn)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        def submit():
+            title = title_edit.text().strip()
+            content = content_edit.toPlainText().strip()
+            if not title or not content:
+                QMessageBox.warning(dialog, "提示", "标题和内容不能为空")
+                return
+            resp = self.network.send_request(
+                "add_post",
+                {"title": title, "content": content, "account": self.current_user["account"]},
+            )
+            if resp and resp.get("status") == "success":
+                QMessageBox.information(dialog, "成功", "发帖成功")
+                dialog.accept()
+                self.refresh_announcements_page()
+            else:
+                QMessageBox.warning(dialog, "失败", resp.get("message", "发帖失败"))
+
+        submit_btn.clicked.connect(submit)
+        dialog.exec_()
 
     def build_profile_page(self):
         page = QWidget()
@@ -876,6 +1200,7 @@ class HomeWindow(QMainWindow):
                 resp = self.network.send_request("get_my_reservations", {"user_account": user['account']})
                 if resp and resp.get("status") == "success":
                     data = resp.get("data", [])
+                    self.latest_reservations = data
                     if data:
                         for r in data:
                             # r: {id, venue, court, date, time, status}
@@ -883,21 +1208,56 @@ class HomeWindow(QMainWindow):
                                 "confirmed": "已预约",
                                 "cancelled": "已取消",
                                 "queued": "排队中",
-                                "finished": "已完成"
+                                "checked_in": "已签到",
+                                "no_show": "爽约",
+                                "cancelled_by_teacher": "教师取消",
+                                "completed": "已完成",
+                                "finished": "已完成",
                             }
                             status_text = status_map.get(r['status'], r['status'])
                             res_list.append(f"{r['date']} {r['time']} | {r['venue']} {r['court']} | {status_text}")
                     else:
                         res_list.append("暂无预约记录")
                 else:
+                    self.latest_reservations = []
                     res_list.append("获取预约失败")
             except Exception as e:
                 print(f"Error fetching reservations: {e}")
+                self.latest_reservations = []
                 res_list.append("获取预约出错")
 
             self.profile_body.addWidget(
                 self.list_card("最近预约", res_list)
             )
+
+            action_card = QFrame()
+            action_card.setStyleSheet(
+                """
+                QFrame {
+                    background-color: white;
+                    border-radius: 12px;
+                    border: 1px solid #e5e7eb;
+                }
+                """
+            )
+            action_layout = QVBoxLayout(action_card)
+            action_layout.setContentsMargins(16, 16, 16, 16)
+            action_layout.setSpacing(10)
+            action_title = QLabel("预约操作")
+            action_title.setStyleSheet("font-size: 16px; font-weight: 800;")
+            action_layout.addWidget(action_title)
+
+            btn_row = QHBoxLayout()
+            check_in_btn = self.action_button("签到")
+            check_in_btn.clicked.connect(self.prompt_check_in)
+            btn_row.addWidget(check_in_btn)
+            cancel_btn = self.action_button("取消预约")
+            cancel_btn.clicked.connect(self.prompt_cancel_reservation)
+            btn_row.addWidget(cancel_btn)
+            btn_row.addStretch(1)
+            action_layout.addLayout(btn_row)
+
+            self.profile_body.addWidget(action_card)
 
     def build_settings_page(self):
         page = QWidget()
@@ -936,6 +1296,97 @@ class HomeWindow(QMainWindow):
         self.login_window = LoginWindow(self.network, login_callback=self.on_login_success)
         self.login_window.show_register()
         self.login_window.show()
+
+    def prompt_check_in(self):
+        if not self.current_user:
+            self.open_login_window()
+            return
+
+        candidates = [
+            r for r in self.latest_reservations if r.get("status") == "confirmed"
+        ]
+        if not candidates:
+            QMessageBox.information(self, "提示", "当前没有可签到的预约。")
+            return
+
+        display_items = []
+        for r in candidates:
+            display_items.append(
+                f"{r.get('date')} {r.get('time')} | {r.get('venue')} {r.get('court')} (ID:{r.get('id')})"
+            )
+
+        selection, ok = QInputDialog.getItem(
+            self, "预约签到", "选择要签到的预约：", display_items, 0, False
+        )
+        if not ok:
+            return
+
+        selected_index = display_items.index(selection)
+        reservation_id = candidates[selected_index].get("id")
+        if not reservation_id:
+            QMessageBox.warning(self, "提示", "预约信息异常，无法签到。")
+            return
+
+        resp = self.network.send_request(
+            "check_in",
+            {
+                "user_account": self.current_user["account"],
+                "reservation_id": reservation_id,
+            },
+        )
+        if resp and resp.get("status") == "success":
+            QMessageBox.information(self, "签到成功", resp.get("message", "签到成功"))
+            self.refresh_profile_body()
+        else:
+            QMessageBox.warning(self, "签到失败", resp.get("message", "签到失败，请稍后重试"))
+
+    def prompt_cancel_reservation(self):
+        if not self.current_user:
+            self.open_login_window()
+            return
+
+        candidates = [
+            r
+            for r in self.latest_reservations
+            if r.get("status") in ("confirmed", "queued")
+        ]
+        if not candidates:
+            QMessageBox.information(self, "提示", "当前没有可取消的预约。")
+            return
+
+        status_map = {"confirmed": "已预约", "queued": "排队中"}
+        display_items = []
+        for r in candidates:
+            status_label = status_map.get(r.get("status"), r.get("status"))
+            display_items.append(
+                f"{r.get('date')} {r.get('time')} | {r.get('venue')} {r.get('court')} "
+                f"| {status_label} (ID:{r.get('id')})"
+            )
+
+        selection, ok = QInputDialog.getItem(
+            self, "取消预约", "选择要取消的预约：", display_items, 0, False
+        )
+        if not ok:
+            return
+
+        selected_index = display_items.index(selection)
+        reservation_id = candidates[selected_index].get("id")
+        if not reservation_id:
+            QMessageBox.warning(self, "提示", "预约信息异常，无法取消。")
+            return
+
+        resp = self.network.send_request(
+            "cancel_booking",
+            {
+                "user_account": self.current_user["account"],
+                "reservation_id": reservation_id,
+            },
+        )
+        if resp and resp.get("status") == "success":
+            QMessageBox.information(self, "取消成功", resp.get("message", "取消成功"))
+            self.refresh_profile_body()
+        else:
+            QMessageBox.warning(self, "取消失败", resp.get("message", "取消失败，请稍后重试"))
 
     def show_available_slots(self, search_params):
         venue_text = search_params["venue"]
@@ -1041,6 +1492,7 @@ class HomeWindow(QMainWindow):
         if not self.current_user:
             self.open_login_window()
             return
+        self.refresh_venue_combo(preserve_selection=True)
         venue_text = self.venue_combo.currentText() if self.venue_combo else "未选择"
         date = self.date_edit.date().toString("yyyy-MM-dd")
         time_text = self.time_combo.currentText() if self.time_combo else "任何时间"
@@ -1132,6 +1584,8 @@ class HomeWindow(QMainWindow):
         self.fetch_weather_for_today()
         
         self.refresh_profile_body()
+        self.refresh_venue_combo()
+        self.update_post_button_state()
 
     def on_logout_success(self):
         """Callback when user logs out from dashboard"""
@@ -1144,10 +1598,7 @@ class HomeWindow(QMainWindow):
         self.register_btn.setVisible(True)
         self.weather_label.setVisible(False)  # 登出时隐藏天气信息
         self.refresh_profile_body()
-
-        # Switch back to Home
-        self.content_stack.setCurrentIndex(0)
-        self.set_active_nav(self.nav_buttons[0])
+        self.update_post_button_state()
 
         # Clean up dashboards
         if hasattr(self, "teacher_page"):
@@ -1158,9 +1609,18 @@ class HomeWindow(QMainWindow):
             self.content_stack.removeWidget(self.admin_page)
             del self.admin_page
 
+        # Switch back to Home (after cleanup to avoid blank current widget)
+        if hasattr(self, "home_page"):
+            self.content_stack.setCurrentWidget(self.home_page)
+        else:
+            self.content_stack.setCurrentIndex(0)
+        if self.nav_buttons:
+            self.set_active_nav(self.nav_buttons[0])
+
     def handle_nav_click(self, btn, key):
         """Handle navigation button clicks with permission checks"""
         if key == "home":
+            self.refresh_venue_combo(preserve_selection=True)
             self.content_stack.setCurrentIndex(0)
             self.set_active_nav(btn)
             return
@@ -1210,10 +1670,14 @@ class HomeWindow(QMainWindow):
                     self.open_login_window()
                     return
 
-            if key == "profile":
-                self.refresh_profile_body()
-            self.content_stack.setCurrentWidget(page)
-            self.set_active_nav(btn)
+        if key == "profile":
+            self.refresh_profile_body()
+        if key == "announcements":
+            self.refresh_announcements_page()
+        if key == "venues":
+            self.refresh_venues_page()
+        self.content_stack.setCurrentWidget(page)
+        self.set_active_nav(btn)
 
 
 if __name__ == "__main__":
